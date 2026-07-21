@@ -6,6 +6,18 @@ Use code evidence only when it tests a concrete hypothesis about implementation 
 
 Resolve the relevant Repository from current issue evidence or an organization Profile. A business Repository URL does not exclude a platform pipeline, shared workflow, gateway, or orchestration Repository; route by component role before fetching code.
 
+After Jira collection and issue understanding, resolve Profile candidates deterministically:
+
+```bash
+python3 "$SKILL_DIR/scripts/l05_profile.py" resolve \
+  --vault /absolute/path/to/vault \
+  --problem-type cicd.pipeline_execution \
+  --signal "current error or stage" \
+  --component "current ticket component"
+```
+
+Use only current Jira facts, validated runtime evidence, and safely derived classifications as resolver inputs. Record each matched rule and reason. `no_match` is an Evidence Gap; do not invent a Repository or silently fall back to a personal local checkout.
+
 Use `scripts/git_snapshot.py` with the exact runtime Commit, branch, or tag when available:
 
 ```bash

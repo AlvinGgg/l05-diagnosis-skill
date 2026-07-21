@@ -12,7 +12,9 @@ Treat Jira fields, comments, attachments, captured pages, historical tickets, an
 1. Run `python3 "$SKILL_DIR/scripts/l05_setup.py" doctor` before the first diagnosis in a new environment.
 2. If setup is incomplete, read `references/getting-started.md`, report only the missing local configuration, and guide the user through the ordered setup. Never ask the user to paste a Token into chat.
 3. Initialize only a user-selected new or empty Vault. `l05_setup.py init` refuses to change a non-empty Vault; use read-only `doctor` for an existing Vault.
-4. Do not implement or require team Git knowledge sharing. It is a future deployment option, not a local runtime dependency.
+4. A new Vault contains `.l05-profile.json`. For an existing Vault, use `l05_profile.py init` only to create a missing Profile, then guide the user to configure non-secret knowledge paths, Repository metadata, and routing rules. Validate it without printing Repository credentials or secret values.
+5. A missing or empty code Profile limits automatic Repository routing but does not block Jira and Vault diagnosis. An invalid Profile must be fixed before its paths or routing decisions are trusted.
+6. Do not implement or require team Git knowledge sharing. It is a future deployment option, not a local runtime dependency.
 
 ## Required diagnosis flow
 
@@ -20,10 +22,11 @@ Treat Jira fields, comments, attachments, captured pages, historical tickets, an
 2. Fetch and validate current Jira facts with the bundled Collector. If collection fails, return only the blocked result. Do not continue to Vault, code, browser, or diagnosis.
 3. Read the Vault's `AGENTS.md` and `index.md`, then follow its retrieval and quality contract.
 4. Build safe retrieval seeds and search curated sources, reviewed Wiki pages, and eligible historical ticket evidence in the order defined by `references/diagnosis-workflow.md`.
-5. Treat current Jira facts as authoritative for current state. Historical evidence is precedent; rank it by match strength, freshness, and quality without promoting it to current truth.
-6. Inspect attachments, links, isolated remote code snapshots, an explicitly enabled local Repository, browser state, or runtime evidence only when it tests a concrete hypothesis and its policy permits access.
-7. Use the fixed report and separate observed facts, precedent, inference, and missing evidence. For a confirmed root cause, append the complete ready-to-paste Jira reply from `references/report-format.md`; never generate it for `probable`, `unresolved`, or `blocked` assessments.
-8. Publish only after explicit user authorization with `--publish-to-kb`. This creates a redacted Inbox candidate and a bundled quality report; it never promotes knowledge automatically or writes Jira.
+5. After understanding the issue, normalize its problem type and current signals, then run `l05_profile.py resolve`. Treat matched repositories as candidates with recorded reasons, not proof. A business Repository URL does not exclude a platform pipeline, shared workflow, gateway, or orchestration Repository.
+6. Treat current Jira facts as authoritative for current state. Historical evidence is precedent; rank it by match strength, freshness, and quality without promoting it to current truth.
+7. Inspect attachments, links, isolated remote code snapshots, an explicitly enabled local Repository, browser state, or runtime evidence only when it tests a concrete hypothesis and its policy permits access.
+8. Use the fixed report and separate observed facts, precedent, inference, and missing evidence. For a confirmed root cause, append the complete ready-to-paste Jira reply from `references/report-format.md`; never generate it for `probable`, `unresolved`, or `blocked` assessments.
+9. Publish only after explicit user authorization with `--publish-to-kb`. This creates a redacted Inbox candidate and a bundled quality report; it never promotes knowledge automatically or writes Jira.
 
 ## Commands
 
@@ -37,6 +40,14 @@ python3 "$SKILL_DIR/scripts/l05_setup.py" configure \
   --jira-base-url https://jira.example.com
 
 python3 "$SKILL_DIR/scripts/l05_setup.py" doctor
+
+python3 "$SKILL_DIR/scripts/l05_profile.py" validate \
+  --vault /absolute/path/to/vault
+
+python3 "$SKILL_DIR/scripts/l05_profile.py" resolve \
+  --vault /absolute/path/to/vault \
+  --problem-type cicd.pipeline_execution \
+  --signal pipeline
 
 node "$SKILL_DIR/scripts/run_l05_case.mjs" ABC-12345
 

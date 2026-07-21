@@ -4,7 +4,7 @@ Keep all organization-specific values outside the public Skill. Do not store sec
 
 ## First-time setup
 
-Read `getting-started.md`, initialize a new empty Vault with `scripts/l05_setup.py init`, update the generated private configuration file, and run `scripts/l05_setup.py doctor`.
+Read `getting-started.md`, initialize a new empty Vault with `scripts/l05_setup.py init`, update the generated private configuration file, validate the generated Vault Profile, and run `scripts/l05_setup.py doctor`.
 
 ## Required configuration
 
@@ -15,6 +15,19 @@ Read `getting-started.md`, initialize a new empty Vault with `scripts/l05_setup.
 - `L05_OBSIDIAN_VAULT`: absolute path to the local Vault.
 
 `PAAS_KB_ROOT` remains a legacy-compatible alias for an existing Vault. New installations should use `L05_OBSIDIAN_VAULT`.
+
+## Vault Profile
+
+`<Vault>/.l05-profile.json` contains only non-secret knowledge-path mappings, Repository metadata, and deterministic routing rules. It is separate from the private environment file. A new Vault receives a generic empty Profile; an existing Vault can create one with:
+
+```bash
+python3 scripts/l05_profile.py init --vault /absolute/path/to/vault
+python3 scripts/l05_profile.py validate --vault /absolute/path/to/vault
+```
+
+The internal Schema is `references/schemas/l05-profile.schema.json`; users normally edit the generated example instead of the Schema. Repository URLs must rely on SSH Agent or Git Credential Helper and must not contain credentials, query parameters, or fragments.
+
+Missing Repository entries only limit automatic code routing. Invalid Profile JSON, unsafe paths, unknown routing targets, or secret-shaped fields must be fixed before the Profile is used.
 
 ## Optional configuration
 

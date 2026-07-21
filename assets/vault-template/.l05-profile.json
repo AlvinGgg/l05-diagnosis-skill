@@ -12,6 +12,10 @@
     "wiki_sources_documents": "wiki/sources/documents",
     "wiki_sources_tickets": "wiki/sources/tickets",
     "wiki_sources_jira": "wiki/sources/jira",
+    "wiki_howtos": "wiki/howtos",
+    "wiki_systems": "wiki/systems",
+    "wiki_topics": "wiki/topics",
+    "wiki_concepts": "wiki/concepts",
     "quality_reports": "system/reports/jira-quality"
   },
   "code": {

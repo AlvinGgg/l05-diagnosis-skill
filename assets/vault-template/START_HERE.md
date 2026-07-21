@@ -12,7 +12,17 @@
 $l05-diagnosis 检查我的本地 L05 配置是否就绪，暂时不要诊断工单。
 ```
 
-## 2. 安装 Obsidian 官方 Web Clipper
+## 2. 配置非秘密 Profile
+
+当前 Vault 根目录的 `.l05-profile.json` 用于记录知识目录映射，以及可选的远程代码仓库和路由规则。让 Codex 引导你填写，不要把 Token、密码、Cookie、私钥或包含凭据的仓库 URL 写入该文件：
+
+```text
+$l05-diagnosis 请检查当前 Vault 的 .l05-profile.json，引导我配置非秘密的知识路径和代码仓库路由，然后验证配置。不要读取或输出凭据值。
+```
+
+如果只使用 Jira 和知识库初诊，可以暂时保留空的仓库列表；这只会限制自动代码仓库路由。
+
+## 3. 安装 Obsidian 官方 Web Clipper
 
 按照 <https://obsidian.md/help/web-clipper> 安装官方浏览器扩展，并选择当前 Vault。
 
@@ -23,11 +33,11 @@ $l05-diagnosis 检查我的本地 L05 配置是否就绪，暂时不要诊断工
 
 模板至少保留标题、来源 URL、采集日期和有用正文。对需要登录或内容噪声较多的页面，只选择与问题相关的 Summary、Description、用户评论、处理结论和验证证据。不要采集凭据、Cookie、Token、私钥、带秘密参数的 URL 或无关个人信息。
 
-## 3. 保持 Inbox 边界
+## 4. 保持 Inbox 边界
 
 新文档和工单页面必须先进入 `inbox/`，不要直接写入 `raw/` 或 `wiki/`。
 
-## 4. 让 Obsidian Agent 整理内容
+## 5. 让 Obsidian Agent 整理内容
 
 将当前 Vault 作为 Agent 工作目录打开，然后发送：
 
@@ -39,11 +49,11 @@ $l05-diagnosis 检查我的本地 L05 配置是否就绪，暂时不要诊断工
 
 先检查 Agent 给出的计划，再授权持久化写入。删除 Inbox 或 Raw 文件始终需要单独确认。
 
-## 5. 检查知识检索
+## 6. 检查知识检索
 
 确认 `index.md` 已链接到审核后的 Wiki 页面，并且 Source 页面能够追溯到 Raw 证据或安全的来源 URL。
 
-## 6. 使用 L05 诊断工单
+## 7. 使用 L05 诊断工单
 
 新建 Codex 任务并输入：
 

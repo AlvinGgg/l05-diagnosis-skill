@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fetch_jira_issue import load_missing_l05_config_env
+from l05_profile import load_profile, profile_path
 
 
 DEFAULT_PATHS = [
@@ -24,6 +25,18 @@ DEFAULT_PATHS = [
     "wiki/topics",
     "raw/tickets",
 ]
+
+PROFILE_SEARCH_KEYS = (
+    "index",
+    "wiki_sources_documents",
+    "wiki_sources_tickets",
+    "wiki_sources_jira",
+    "wiki_howtos",
+    "wiki_systems",
+    "wiki_topics",
+    "wiki_concepts",
+    "raw_tickets",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,7 +63,8 @@ def main() -> int:
     if not vault.exists():
         print(f"Vault does not exist: {vault}", file=sys.stderr)
         return 2
-    paths = [vault / path for path in (args.paths or DEFAULT_PATHS) if (vault / path).exists()]
+    configured_paths = profile_search_paths(vault)
+    paths = [vault / path for path in (args.paths or configured_paths) if (vault / path).exists()]
     pattern = build_pattern(args.terms, args.regex)
     if shutil.which("rg"):
         matches = rg_search(vault, paths, pattern, args.case_sensitive, args.context, args.max_results, args.max_text_chars)
@@ -65,6 +79,14 @@ def main() -> int:
     }
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def profile_search_paths(vault: Path) -> list[str]:
+    profile, validation = load_profile(profile_path(vault))
+    if not profile or not validation["valid"]:
+        return DEFAULT_PATHS
+    knowledge = profile["knowledge"]
+    return list(dict.fromkeys(knowledge[key] for key in PROFILE_SEARCH_KEYS if knowledge.get(key)))
 
 
 def build_pattern(terms: list[str], is_regex: bool) -> str:

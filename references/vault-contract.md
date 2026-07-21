@@ -7,7 +7,7 @@ The root `AGENTS.md` is the authority for a Vault. The bundled template is only 
 - `AGENTS.md`: Agent workflow and safety boundary.
 - `index.md`: retrieval router.
 - `log.md`: append-only maintenance history.
-- `.l05-profile.json`: non-secret logical path mapping for a newly initialized Vault.
+- `.l05-profile.json`: non-secret logical path mapping plus optional Repository catalog and deterministic routing rules. Validate it with `scripts/l05_profile.py`; never store credentials in it.
 
 ## Logical paths
 

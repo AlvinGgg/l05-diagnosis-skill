@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from fetch_jira_issue import load_missing_l05_env, load_missing_zshrc_env
 from inspect_github_actions import inspect, parse_actions_url
+from l05_profile import validate_profile
 from link_inspector import classify_response, classify_url, redact_url
 from safe_preview import preview
 
@@ -169,7 +170,68 @@ class SafetyTests(unittest.TestCase):
             report = json.loads(result.stdout)
             self.assertEqual(report["status"], "ready")
             self.assertEqual(report["jira_token_configured"], True)
+            self.assertEqual(report["profile"]["status"], "valid")
+            self.assertEqual(report["profile"]["code_routing_configured"], False)
+            self.assertIn("code_repositories_not_configured", report["warnings"])
             self.assertNotIn("fixture-private-value", result.stdout)
+
+    def test_profile_resolves_repository_candidates_without_credentials(self):
+        skill = Path(__file__).resolve().parents[1]
+        script = skill / "scripts" / "l05_profile.py"
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+            profile["code"] = {
+                "repositories": [
+                    {
+                        "id": "shared-pipeline",
+                        "url": "git@git.example.test:platform/shared-pipeline.git",
+                        "roles": ["shared-pipeline"],
+                        "default_ref": "main",
+                    }
+                ],
+                "routing_rules": [
+                    {
+                        "id": "cicd-shared-pipeline",
+                        "match": {
+                            "problem_types": ["cicd.*"],
+                            "keywords": ["pipeline"],
+                            "match_mode": "all",
+                        },
+                        "repositories": ["shared-pipeline"],
+                        "reason": "Pipeline execution may depend on shared implementation.",
+                    }
+                ],
+            }
+            (vault / ".l05-profile.json").write_text(json.dumps(profile), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(script), "resolve", "--vault", str(vault), "--problem-type", "cicd.pipeline_execution", "--signal", "pipeline failed"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = json.loads(result.stdout)
+            self.assertEqual(output["status"], "matched")
+            self.assertEqual(output["candidates"][0]["repository_id"], "shared-pipeline")
+            self.assertEqual(output["candidates"][0]["matched_rules"], ["cicd-shared-pipeline"])
+
+    def test_profile_rejects_secret_fields_and_credential_urls(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        profile["code"]["repositories"] = [
+            {
+                "id": "unsafe-repository",
+                "url": "https://user:password@git.example.test/platform/repository.git",
+                "roles": ["business-source"],
+                "access_token": "fixture-placeholder",
+            }
+        ]
+        validation = validate_profile(profile)
+        codes = {item["code"] for item in validation["errors"]}
+        self.assertEqual(validation["valid"], False)
+        self.assertIn("profile_must_not_contain_secret_fields", codes)
+        self.assertIn("repository_url_is_invalid_or_contains_credentials", codes)
 
     def test_configure_updates_only_non_secret_values(self):
         skill = Path(__file__).resolve().parents[1]

@@ -39,15 +39,42 @@ L05_OBSIDIAN_VAULT=/absolute/path/to/new-vault
 
 For Jira Basic authentication also set `JIRA_EMAIL` and use `JIRA_AUTH_MODE=basic`. Keep the file permission at `0600`. Never paste the Token into an Agent conversation, commit it, place it in the Vault, or pass it on a command line.
 
-Run the read-only check:
+### 3. Configure the non-secret Vault Profile
+
+New Vaults already contain `.l05-profile.json`. For an existing Vault, create only the missing Profile without changing other files:
+
+```bash
+python3 "$SKILL_DIR/scripts/l05_profile.py" init \
+  --vault /absolute/path/to/existing-vault
+```
+
+Review the generated Profile and keep only non-secret values in it:
+
+- map the Vault's existing logical knowledge paths;
+- add remote Repository URLs without embedded credentials;
+- assign stable Repository roles such as `business-source`, `pipeline-orchestrator`, `shared-workflow`, or `gateway`;
+- add deterministic rules that map normalized problem types and current signals to candidate repositories.
+
+The public Skill does not know organization field names, products, domains, or repositories. Do not add Tokens, passwords, Cookies, private keys, authentication headers, or secret-bearing URLs to the Profile.
+
+Validate it:
+
+```bash
+python3 "$SKILL_DIR/scripts/l05_profile.py" validate \
+  --vault /absolute/path/to/vault
+```
+
+An empty Repository catalog is allowed and means automatic code routing is unavailable. Invalid Profile JSON or unsafe mappings must be fixed.
+
+### 4. Run the setup check
 
 ```bash
 python3 "$SKILL_DIR/scripts/l05_setup.py" doctor
 ```
 
-Do not start diagnosis until `jira_token_configured`, `jira_base_url_configured`, the Vault Contract, and Node.js are ready.
+Do not start diagnosis until `jira_token_configured`, `jira_base_url_configured`, the Vault Contract, Profile validation, and Node.js are ready. `code_repositories_not_configured` is a warning rather than a blocker for Jira and Vault diagnosis.
 
-### 3. Install the official Obsidian Web Clipper
+### 5. Install the official Obsidian Web Clipper
 
 Install **Obsidian Web Clipper**, the official browser extension documented at <https://obsidian.md/help/web-clipper>. Configure it to save locally to the initialized Vault.
 
@@ -60,7 +87,7 @@ Use a title-based file name and capture at least the page title, source URL, cap
 
 Web Clipper templates support a configurable Note location and custom page variables. Follow the current official template documentation at <https://obsidian.md/help/web-clipper/templates>.
 
-### 4. Put content in the correct Inbox
+### 6. Put content in the correct Inbox
 
 - General documents: `inbox/documents/`
 - Manually clipped tickets: `inbox/tickets/`
@@ -68,7 +95,7 @@ Web Clipper templates support a configurable Note location and custom page varia
 
 Do not place new content directly under `raw/` or `wiki/`. Inbox is the review boundary.
 
-### 5. Ask the Obsidian Agent to organize content
+### 7. Ask the Obsidian Agent to organize content
 
 Open the Vault as the Agent workspace so the root `AGENTS.md` applies, then use this prompt:
 
@@ -80,7 +107,7 @@ Open the Vault as the Agent workspace so the root `AGENTS.md` applies, then use 
 
 The Agent must preview before durable writes and must ask before deleting Inbox or Raw files.
 
-### 6. Verify retrieval
+### 8. Verify retrieval
 
 After the Agent organizes content, confirm that `index.md` links to the new Wiki pages and that every Wiki claim points to a source or Raw path. Then test a narrow query:
 
@@ -89,7 +116,7 @@ python3 "$SKILL_DIR/scripts/search_obsidian.py" "a distinctive error or product 
   --vault /absolute/path/to/new-vault
 ```
 
-### 7. Use L05 diagnosis
+### 9. Use L05 diagnosis
 
 Start a Codex task with:
 
@@ -101,7 +128,7 @@ The Agent must run setup checks, fetch current Jira facts first, then query the 
 
 ## Optional code evidence
 
-Configure remote Repository URLs in the private organization Profile or provide one for the current case. Prefer `scripts/git_snapshot.py` so code is fetched into an isolated cache and temporary Worktree. Do not require or alter the user's existing local repositories.
+Configure remote Repository URLs and routing rules in `.l05-profile.json`, then use `scripts/l05_profile.py resolve` after understanding the current issue. Prefer `scripts/git_snapshot.py` so matched code is fetched into an isolated cache and temporary Worktree. Do not require or alter the user's existing local repositories.
 
 ## Common setup failures
 
@@ -109,4 +136,7 @@ Configure remote Repository URLs in the private organization Profile or provide 
 - `jira_base_url_missing_or_placeholder`: replace `jira.example.invalid` with the real Jira base URL.
 - `vault_not_configured`: set `L05_OBSIDIAN_VAULT` or pass `--vault`.
 - `vault_contract_incomplete`: initialize a new empty Vault, or inspect the existing Vault's `AGENTS.md` compatibility without overwriting it.
+- `profile_missing_code_routing_unavailable`: create `.l05-profile.json`; base diagnosis remains available until code routing is needed.
+- `profile_invalid`: run `l05_profile.py validate` and fix only the reported non-secret field paths.
+- `code_repositories_not_configured`: optional code routing is unavailable; add Repository metadata and rules when needed.
 - Web Clipper captures incomplete content: select the required page sections or use a site-specific template before clipping again.

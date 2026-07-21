@@ -11,6 +11,8 @@ import stat
 import sys
 from pathlib import Path
 
+from l05_profile import PROFILE_NAME, load_profile, profile_path
+
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_ROOT = SKILL_ROOT / "assets" / "vault-template"
@@ -199,6 +201,7 @@ def initialize(args: argparse.Namespace) -> int:
                 "config_result": config_result,
                 "next": [
                     "set JIRA_BASE_URL and JIRA_TOKEN in the private configuration file",
+                    f"review {PROFILE_NAME}, add non-secret code repositories and routing rules if code diagnosis is needed, then run l05_profile.py validate",
                     "install the official Obsidian Web Clipper and target inbox/documents or inbox/tickets",
                     "ask the Obsidian agent to process inbox files under the vault AGENTS.md contract",
                     "run l05_setup.py doctor before the first diagnosis",
@@ -250,13 +253,36 @@ def doctor(args: argparse.Namespace) -> int:
     config = read_literal_env(config_path)
     configured_vault = args.vault or os.environ.get("L05_OBSIDIAN_VAULT") or os.environ.get("PAAS_KB_ROOT") or config.get("L05_OBSIDIAN_VAULT") or config.get("PAAS_KB_ROOT")
     vault = Path(configured_vault).expanduser().resolve() if configured_vault else None
-    missing_files = [name for name in CORE_FILES if not vault or not (vault / name).is_file()]
-    missing_directories = [name for name in DIRECTORIES if not vault or not (vault / name).is_dir()]
     token_configured = bool(os.environ.get("JIRA_TOKEN") or config.get("JIRA_TOKEN"))
     base_url = os.environ.get("JIRA_BASE_URL") or config.get("JIRA_BASE_URL", "")
     base_url_configured = bool(base_url and "example.invalid" not in base_url)
     tools = {name: bool(shutil.which(name)) for name in ("node", "python3", "git", "rg")}
     blockers = []
+    warnings = []
+
+    profile_file = profile_path(vault) if vault else None
+    profile = None
+    profile_validation = {"valid": False, "errors": [], "warnings": []}
+    if profile_file and profile_file.is_file():
+        profile, profile_validation = load_profile(profile_file)
+        if not profile_validation["valid"]:
+            blockers.append("profile_invalid")
+        warnings.extend(item["code"] for item in profile_validation["warnings"])
+    else:
+        warnings.append("profile_missing_code_routing_unavailable")
+
+    if profile and profile_validation["valid"]:
+        knowledge = profile["knowledge"]
+        expected_files = tuple(dict.fromkeys((knowledge["contract"], knowledge["index"], "log.md")))
+        expected_directories = tuple(
+            dict.fromkeys(value for key, value in knowledge.items() if key not in ("contract", "index"))
+        )
+    else:
+        expected_files = CORE_FILES
+        expected_directories = DIRECTORIES
+    missing_files = [name for name in expected_files if not vault or not (vault / name).is_file()]
+    missing_directories = [name for name in expected_directories if not vault or not (vault / name).is_dir()]
+
     if not vault:
         blockers.append("vault_not_configured")
     elif not vault.is_dir():
@@ -270,6 +296,9 @@ def doctor(args: argparse.Namespace) -> int:
     if not tools["node"]:
         blockers.append("node_missing")
 
+    repository_count = len(profile.get("code", {}).get("repositories", [])) if profile else 0
+    routing_rule_count = len(profile.get("code", {}).get("routing_rules", [])) if profile else 0
+
     result = {
         "status": "ready" if not blockers else "needs_setup",
         "changed": False,
@@ -280,8 +309,17 @@ def doctor(args: argparse.Namespace) -> int:
         "jira_base_url_configured": base_url_configured,
         "missing_contract_files": missing_files,
         "missing_directories": missing_directories,
+        "profile": {
+            "path": str(profile_file) if profile_file else None,
+            "status": "valid" if profile_validation["valid"] else "missing" if not profile_file or not profile_file.is_file() else "invalid",
+            "repository_count": repository_count,
+            "routing_rule_count": routing_rule_count,
+            "code_routing_configured": bool(repository_count and routing_rule_count),
+            "errors": profile_validation["errors"],
+        },
         "tools": tools,
         "blockers": blockers,
+        "warnings": sorted(set(warnings)),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not blockers else 2

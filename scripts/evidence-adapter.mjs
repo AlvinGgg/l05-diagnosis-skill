@@ -5,6 +5,39 @@ const SENSITIVE = /(?:token|secret|password|passwd|authorization|cookie|signatur
 const URL_WITH_SECRET = /https?:\/\/[^\s<>)\]]*[?&](?:token|sig|sign|signature|secret|key|auth|sas|nonce)=/i;
 const STOP_WORDS = new Set(["the", "and", "with", "from", "that", "this", "please", "error", "issue", "http", "https", "curl", "header", "request", "ticket", "support", "assigned", "engineer", "config", "gateway", "consumer", "path", "page", "timestamp", "thumbnail", "服务", "问题", "用户", "需要", "无法", "请问", "help"]);
 const AUTOMATION_AUTHOR = /(?:bot|automation|stackstorm|opsagent|no[-_ ]?reply|noreply|\bim\b|system)/i;
+const DEFAULT_KNOWLEDGE_PATHS = Object.freeze({
+  contract: "AGENTS.md",
+  index: "index.md",
+  raw_tickets: "raw/tickets",
+  wiki_sources_documents: "wiki/sources/documents",
+  wiki_sources_tickets: "wiki/sources/tickets",
+  wiki_sources_jira: "wiki/sources/jira",
+  wiki_howtos: "wiki/howtos",
+  wiki_systems: "wiki/systems",
+  wiki_topics: "wiki/topics",
+  wiki_concepts: "wiki/concepts",
+  quality_reports: "system/reports/jira-quality",
+});
+
+function safeRelative(value) {
+  if (typeof value !== "string" || !value.trim() || value.includes("\0") || value.includes("\\") || path.isAbsolute(value)) return false;
+  return !value.split("/").includes("..");
+}
+
+export function loadVaultProfile(kbRoot) {
+  const file = path.join(path.resolve(kbRoot), ".l05-profile.json");
+  if (!fs.existsSync(file)) return {status: "missing", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: ["profile_not_found"]};
+  try {
+    const profile = JSON.parse(readText(file));
+    const configured = profile?.knowledge;
+    if (typeof configured !== "object" || configured === null) throw new Error("knowledge_mapping_missing");
+    const invalid = Object.entries(configured).filter(([, value]) => !safeRelative(value)).map(([key]) => `unsafe_knowledge_path:${key}`);
+    if (invalid.length) return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: invalid};
+    return {status: "valid", paths: {...DEFAULT_KNOWLEDGE_PATHS, ...configured}, errors: []};
+  } catch {
+    return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: ["profile_json_is_invalid"]};
+  }
+}
 
 function walk(root, predicate, values = []) {
   if (!fs.existsSync(root)) return values;
@@ -112,9 +145,9 @@ function qualityLevel(report) {
   return "rejected";
 }
 
-function loadQualityReports(kbRoot) {
+function loadQualityReports(kbRoot, knowledgePaths) {
   const reports = new Map();
-  for (const file of walk(path.join(kbRoot, "system/reports/jira-quality"), (item) => item.endsWith(".json"))) {
+  for (const file of walk(path.join(kbRoot, knowledgePaths.quality_reports), (item) => item.endsWith(".json"))) {
     try {
       const report = JSON.parse(readText(file));
       if (report.ingest_id && report.content_hash) reports.set(`${report.ingest_id}|${report.content_hash}`, {...report, _path: relative(kbRoot, file)});
@@ -206,13 +239,14 @@ function scoreCandidate(candidate, seedDetails, jiraUpdated) {
 
 export function findKbMatches(kbRoot, issueOrKey, jiraUpdated = "") {
   const root = path.resolve(kbRoot);
+  const knowledgePaths = loadVaultProfile(root).paths;
   const issue = typeof issueOrKey === "string" ? {source: {issue_key: issueOrKey}, ticket: {summary: issueOrKey, description_markdown: "", components: [], versions: [], fix_versions: [], labels: []}, comments: []} : issueOrKey;
   const seeds = extractRetrievalSeedDetails(issue);
-  const reports = loadQualityReports(root);
+  const reports = loadQualityReports(root, knowledgePaths);
   const candidates = [];
-  for (const file of walk(path.join(root, "wiki/sources/jira"), (item) => item.endsWith(".md"))) candidates.push(candidateFromSourcePage(root, file, reports));
-  for (const [folder, type, rank] of [["wiki/sources/tickets", "ticket_source", 7], ["wiki/sources/documents", "document_source", 6], ["wiki/howtos", "wiki_howto", 5], ["wiki/systems", "wiki_system", 5], ["wiki/topics", "wiki_topic", 5], ["wiki/concepts", "wiki_concept", 4]]) for (const file of walk(path.join(root, folder), (item) => item.endsWith(".md"))) candidates.push(candidateFromWiki(root, file, type, rank));
-  for (const file of walk(path.join(root, "raw/tickets"), (item) => path.basename(item) === "manifest.json")) {
+  for (const file of walk(path.join(root, knowledgePaths.wiki_sources_jira), (item) => item.endsWith(".md"))) candidates.push(candidateFromSourcePage(root, file, reports));
+  for (const [folder, type, rank] of [[knowledgePaths.wiki_sources_tickets, "ticket_source", 7], [knowledgePaths.wiki_sources_documents, "document_source", 6], [knowledgePaths.wiki_howtos, "wiki_howto", 5], [knowledgePaths.wiki_systems, "wiki_system", 5], [knowledgePaths.wiki_topics, "wiki_topic", 5], [knowledgePaths.wiki_concepts, "wiki_concept", 4]]) for (const file of walk(path.join(root, folder), (item) => item.endsWith(".md"))) candidates.push(candidateFromWiki(root, file, type, rank));
+  for (const file of walk(path.join(root, knowledgePaths.raw_tickets), (item) => path.basename(item) === "manifest.json")) {
     const candidate = candidateFromRawBundle(root, file, reports);
     if (candidate) candidates.push(candidate);
   }

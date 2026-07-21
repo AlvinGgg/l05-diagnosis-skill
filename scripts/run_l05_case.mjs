@@ -5,7 +5,7 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import {execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {compareFreshness, extractRetrievalSeedDetails, findKbMatches, retrievalSeeds} from "./evidence-adapter.mjs";
+import {compareFreshness, extractRetrievalSeedDetails, findKbMatches, loadVaultProfile, retrievalSeeds} from "./evidence-adapter.mjs";
 import {BundleWriter} from "./vendor/jira-collector/bundle-writer.mjs";
 import {loadMissingL05ConfigEnv} from "./vendor/jira-collector/env-loader.mjs";
 import {normalizedContentHash, validateBundle} from "./vendor/jira-collector/validate-jira-bundle.mjs";
@@ -49,10 +49,16 @@ async function runCollector({identity, fixture, attachmentMode, caseDir}) {
 }
 
 function readVaultContract(kbRoot) {
-  const files = ["AGENTS.md", "index.md"];
+  const profile = loadVaultProfile(kbRoot);
+  const files = [profile.paths.contract, profile.paths.index];
   const missing = files.filter((file) => !fs.existsSync(path.join(kbRoot, file)));
   for (const file of files.filter((file) => !missing.includes(file))) fs.readFileSync(path.join(kbRoot, file), "utf8");
-  return {status: missing.length ? "partial" : "complete", files: files.filter((file) => !missing.includes(file)), gaps: missing.map((file) => `vault_contract_missing:${file}`)};
+  return {
+    status: missing.length ? "partial" : "complete",
+    files: files.filter((file) => !missing.includes(file)),
+    profile_status: profile.status,
+    gaps: [...missing.map((file) => `vault_contract_missing:${file}`), ...profile.errors.map((item) => `vault_profile:${item}`)],
+  };
 }
 
 function evidenceGaps(issue, injection, vaultContract) {

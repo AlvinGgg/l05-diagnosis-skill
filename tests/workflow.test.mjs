@@ -67,6 +67,38 @@ test("generic clipped document and ticket source folders participate in retrieva
   assert.ok(matches.some((item) => item.source_type === "ticket_source"));
 });
 
+test("vault Profile mappings drive retrieval from organization-specific paths", () => {
+  const root = testKb();
+  const knowledge = {
+    contract: "AGENTS.md",
+    index: "index.md",
+    inbox_documents: "inbox/documents",
+    inbox_tickets: "inbox/tickets",
+    inbox_jira: "inbox/jira",
+    raw_documents: "raw/documents",
+    raw_tickets: "evidence/tickets",
+    wiki_sources_documents: "knowledge/sources/documents",
+    wiki_sources_tickets: "knowledge/sources/tickets",
+    wiki_sources_jira: "knowledge/sources/jira",
+    wiki_howtos: "knowledge/howtos",
+    wiki_systems: "knowledge/systems",
+    wiki_topics: "knowledge/topics",
+    wiki_concepts: "knowledge/concepts",
+    quality_reports: "evidence/reports/jira-quality",
+  };
+  for (const target of Object.values(knowledge)) {
+    if (target.endsWith(".md")) continue;
+    fs.mkdirSync(path.join(root, target), {recursive: true});
+  }
+  fs.writeFileSync(path.join(root, ".l05-profile.json"), JSON.stringify({profile_version: "1.0.0", language: "zh-CN", knowledge, code: {repositories: [], routing_rules: []}}));
+  const reportPath = "evidence/reports/jira-quality/custom.json";
+  writeReport(root, reportPath, {ingest_id: "custom", content_hash: "custom-hash", decision: "promote_active", resolution_quality: {score: 90}, knowledge_value: {score: 8}});
+  fs.writeFileSync(path.join(root, "knowledge/sources/jira/custom.md"), `---\ntype: source\ntitle: "SUP-CUSTOM historical source"\nstatus: active\nupdated: 2026-07-10\n---\n\n- Issue key: SUP-CUSTOM\n- Source updated at: 2026-07-10T00:00:00Z\n- Content hash: custom-hash\n- Raw bundle: evidence/tickets/SUP-CUSTOM/custom\n- Quality report: ${reportPath}\n\nHTTP504 GatewayTimeoutException api.timeout during pipeline deployment.\n`);
+  const matches = findKbMatches(root, issue(), "2026-07-10T00:00:00Z");
+  assert.equal(matches[0].source_ref, "SUP-CUSTOM");
+  assert.equal(matches[0].path, "knowledge/sources/jira/custom.md");
+});
+
 test("fresh medium ranks above equally matching stale high and rejected history is excluded", () => {
   const root = testKb();
   writeReport(root, "system/reports/jira-quality/fresh.json", {ingest_id: "fresh", content_hash: "fresh-hash", decision: "promote_needs_review", resolution_quality: {score: 75}, knowledge_value: {score: 6}});

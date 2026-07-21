@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/l05-diagnosis/schemas/l05-profile.schema.json",
+  "title": "L05 Vault Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile_version", "language", "knowledge", "code"],
+  "properties": {
+    "profile_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$"
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1
+    },
+    "knowledge": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/relativePath"
+      },
+      "required": [
+        "contract",
+        "index",
+        "inbox_documents",
+        "inbox_tickets",
+        "inbox_jira",
+        "raw_documents",
+        "raw_tickets",
+        "wiki_sources_documents",
+        "wiki_sources_tickets",
+        "wiki_sources_jira",
+        "quality_reports"
+      ]
+    },
+    "code": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositories", "routing_rules"],
+      "properties": {
+        "repositories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "url", "roles"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "url": {"type": "string", "minLength": 1},
+              "roles": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {"$ref": "#/$defs/id"}
+              },
+              "default_ref": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "routing_rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "match", "repositories", "reason"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "problem_types": {"$ref": "#/$defs/stringArray"},
+                  "keywords": {"$ref": "#/$defs/stringArray"},
+                  "components": {"$ref": "#/$defs/stringArray"},
+                  "match_mode": {"enum": ["all", "any"]}
+                },
+                "anyOf": [
+                  {"required": ["problem_types"]},
+                  {"required": ["keywords"]},
+                  {"required": ["components"]}
+                ]
+              },
+              "repositories": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {"$ref": "#/$defs/id"}
+              },
+              "reason": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\\u0000]+$"
+    },
+    "stringArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

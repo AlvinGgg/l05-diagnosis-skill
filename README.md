@@ -71,7 +71,8 @@ flowchart TD
 3. 验证 SKILL.md、agents/openai.yaml、scripts、references 和 assets 完整。
 4. 运行 Skill Creator 的 quick_validate.py，以及仓库中的 Node 和 Python 测试。
 5. 运行 scripts/l05_setup.py doctor，只汇报缺少的配置项，不读取或输出任何已有凭据值。
-6. 告诉我需要在本地配置哪些变量，并引导我初始化或连接 Obsidian Vault；不要要求我把 Token 粘贴到对话中。
+6. 告诉我需要在本地配置哪些变量，并引导我初始化或连接 Obsidian Vault、检查 `.l05-profile.json`，不要要求我把 Token 粘贴到对话中。
+7. Profile 只填写非秘密的知识目录、仓库元数据和路由规则；完成后运行 `scripts/l05_profile.py validate`。
 ```
 
 ### 命令安装
@@ -137,7 +138,53 @@ chmod 600 ~/.codex/l05-diagnosis.env
 
 不要把 Token 写入仓库、Vault、命令行参数或 Agent 对话。进程环境变量优先于私有配置文件；`~/.zshrc` 的字面量 `JIRA_TOKEN` 读取仅用于旧环境兼容，推荐使用独立配置文件。
 
-### 3. 检查环境
+### 3. 配置非秘密 Profile
+
+新 Vault 已包含 `<Vault>/.l05-profile.json`。已有 Vault 可以只创建缺失的 Profile，不会覆盖现有文件：
+
+```bash
+python3 "$L05_SKILL_DIR/scripts/l05_profile.py" init \
+  --vault /absolute/path/to/existing-vault
+```
+
+Profile 用于映射 Vault 目录，并在代码排查时把问题类型和当前信号路由到候选仓库。它可以保留在私有 Vault 或团队配置仓库中，但只能包含非秘密信息；Token、密码、Cookie、私钥和带凭据的仓库 URL 都会被校验器拒绝。
+
+配置示例：
+
+```json
+{
+  "id": "shared-pipeline",
+  "url": "git@git.example.com:platform/shared-pipeline.git",
+  "roles": ["shared-pipeline"],
+  "default_ref": "main"
+}
+```
+
+对应的路由规则示例：
+
+```json
+{
+  "id": "cicd-shared-pipeline",
+  "match": {
+    "problem_types": ["cicd.*"],
+    "keywords": ["pipeline", "jenkinsfile"],
+    "match_mode": "all"
+  },
+  "repositories": ["shared-pipeline"],
+  "reason": "CICD pipeline failures may depend on shared pipeline implementation."
+}
+```
+
+仓库 `id` 和角色是组织自定义的通用标识。公共 Skill 不内置公司字段、域名或仓库。配置后验证：
+
+```bash
+python3 "$L05_SKILL_DIR/scripts/l05_profile.py" validate \
+  --vault /absolute/path/to/vault
+```
+
+Profile 缺失或未配置仓库时，Jira 和知识库初诊仍可使用，但自动代码仓库路由受限；Profile 无效时必须先修复。
+
+### 4. 检查环境
 
 ```bash
 python3 "$L05_SKILL_DIR/scripts/l05_setup.py" doctor
@@ -188,12 +235,25 @@ Skill 会按以下顺序执行：
 1. 运行本地配置检查。
 2. 只读获取并验证当前 Jira 工单。
 3. 理解问题类型并生成脱敏检索词。
-4. 按 Vault 契约检索 Wiki、文档和合格历史工单。
-5. 仅针对具体假设检查附件、链接、代码或浏览器证据。
-6. 输出事实、假设、证据缺口、根因等级、建议修改和验证计划。
-7. 仅在根因确认时附带完整 Jira 回复草稿。
+4. 读取并校验 Vault Profile，用当前问题类型、错误信号和组件解析候选平台仓库。
+5. 按 Vault Profile 和契约检索 Wiki、文档和合格历史工单。
+6. 仅针对具体假设检查附件、链接、代码或浏览器证据。
+7. 输出事实、假设、证据缺口、根因等级、建议修改和验证计划。
+8. 仅在根因确认时附带完整 Jira 回复草稿。
 
 ### 可选代码证据
+
+先让 Profile 解析候选仓库：
+
+```bash
+python3 "$L05_SKILL_DIR/scripts/l05_profile.py" resolve \
+  --vault /absolute/path/to/vault \
+  --problem-type cicd.pipeline_execution \
+  --signal "pipeline" \
+  --signal "jenkinsfile"
+```
+
+只有匹配理由与当前假设相关时，才通过 SSH Agent 或 Git Credential Helper 获取候选仓库。Profile 的 `default_ref` 是没有运行版本证据时的回退；工单、构建或运行时提供的 Commit、Branch 或 Tag 优先。
 
 通过 SSH Agent 或 Git Credential Helper 提供仓库认证，不要把凭据嵌入 URL：
 
