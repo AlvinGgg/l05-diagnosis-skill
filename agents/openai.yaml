@@ -1,0 +1,4 @@
+interface:
+  display_name: "L0.5 Jira Diagnosis"
+  short_description: "Set up a local Vault and diagnose Jira issues"
+  default_prompt: "Use $l05-diagnosis to check my local setup and diagnose one Jira support issue from current facts and quality-ranked evidence."

@@ -1,0 +1,21 @@
+{
+  "profile_version": "1.0.0",
+  "language": "zh-CN",
+  "knowledge": {
+    "contract": "AGENTS.md",
+    "index": "index.md",
+    "inbox_documents": "inbox/documents",
+    "inbox_tickets": "inbox/tickets",
+    "inbox_jira": "inbox/jira",
+    "raw_documents": "raw/documents",
+    "raw_tickets": "raw/tickets",
+    "wiki_sources_documents": "wiki/sources/documents",
+    "wiki_sources_tickets": "wiki/sources/tickets",
+    "wiki_sources_jira": "wiki/sources/jira",
+    "quality_reports": "system/reports/jira-quality"
+  },
+  "code": {
+    "repositories": [],
+    "routing_rules": []
+  }
+}

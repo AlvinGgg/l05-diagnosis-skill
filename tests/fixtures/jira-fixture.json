@@ -1,0 +1,11 @@
+{
+  "base_url":"https://jira.example.test",
+  "deployment_type":"data-center",
+  "fetched_at":"2026-07-10T03:00:00Z",
+  "field_catalog":[{"id":"customfield_1","name":"Same name","schema":{"type":"boolean"}},{"id":"customfield_2","name":"Same name","schema":{"type":"number"}}],
+  "issue":{"id":"10003","key":"DEMO-3","fields":{"summary":"Collector fixture","description":{"type":"doc","content":[{"type":"heading","attrs":{"level":2},"content":[{"type":"text","text":"Failure"}]},{"type":"codeBlock","attrs":{"language":"sh"},"content":[{"type":"text","text":"echo safe"}]},{"type":"table","content":[{"type":"tableRow","content":[{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"A"}]}]},{"type":"tableHeader","content":[{"type":"paragraph","content":[{"type":"text","text":"B"}]}]}]},{"type":"tableRow","content":[{"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"1"}]}]},{"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"2"}]}]}]}]},{"type":"mediaSingle","content":[{"type":"media","attrs":{"id":"media-1","collection":"jira"}}]},{"type":"extension","content":[{"type":"paragraph","content":[{"type":"text","text":"preserved unknown"}]}]}]},"status":{"name":"Open"},"issuetype":{"name":"Bug"},"priority":{"name":"Medium"},"updated":"2026-07-10T02:59:00Z","labels":[],"components":[],"versions":[],"fixVersions":[],"subtasks":[],"issuelinks":[],"customfield_1":false,"customfield_2":0,"attachment":[{"id":"30003","filename":"../unsafe.log","size":12,"mimeType":"text/plain","fixture_content":"fixture log\n"}]}},
+  "comments":[{"id":"20003","author":{"displayName":"User","accountId":"user-3"},"created":"2026-07-10T00:00:00Z","updated":"2026-07-10T00:00:00Z","body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Open link","marks":[{"type":"link","attrs":{"href":"https://example.test/path?token=secret"}}]}]}]}}],
+  "comment_status":{"pages":2,"fetched":1,"total":1},
+  "remote_links":[{"id":"1","object":{"url":"https://remote.example.test"}}],
+  "changelog_status":{"status":"complete","pages":1,"fetched":1,"total":1}
+}

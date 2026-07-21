@@ -1,0 +1,28 @@
+# Portable Vault Contract
+
+The root `AGENTS.md` is the authority for a Vault. The bundled template is only for a new or empty Vault; never replace an existing Contract automatically.
+
+## Required core
+
+- `AGENTS.md`: Agent workflow and safety boundary.
+- `index.md`: retrieval router.
+- `log.md`: append-only maintenance history.
+- `.l05-profile.json`: non-secret logical path mapping for a newly initialized Vault.
+
+## Logical paths
+
+- Inbox: `inbox/documents`, `inbox/tickets`, `inbox/jira`
+- Raw: `raw/documents`, `raw/tickets`
+- Sources: `wiki/sources/documents`, `wiki/sources/tickets`, `wiki/sources/jira`
+- Synthesis: `wiki/howtos`, `wiki/systems`, `wiki/topics`, `wiki/concepts`
+- Review: `wiki/questions`, `system/reports/jira-quality`
+
+Existing Vaults may use different physical paths. Resolve them through local configuration or their Contract; do not move files merely to match this template.
+
+## Initialization rules
+
+1. `l05_setup.py init` accepts only a missing or empty target directory.
+2. A non-empty target returns `existing_vault_detected` and changes nothing.
+3. Existing local configuration is never overwritten.
+4. `doctor` is read-only and never emits credential values.
+5. The initializer does not install Obsidian, browser extensions, community plugins, or team synchronization.
