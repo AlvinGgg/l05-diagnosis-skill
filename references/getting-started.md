@@ -2,6 +2,8 @@
 
 Use this guide when the Skill is newly installed, `l05_setup.py doctor` reports `needs_setup`, or the user asks how to prepare the local knowledge Vault.
 
+Optional Evidence Providers are installed only after the Jira and Vault setup below is ready. They are not required for basic diagnosis.
+
 ## Required order
 
 ### 1. Install Obsidian and create a Vault
@@ -134,9 +136,25 @@ Configure remote Repository URLs and routing rules in `.l05-profile.json`, then 
 
 - `jira_token_missing`: update the private configuration file; do not send the Token in chat.
 - `jira_base_url_missing_or_placeholder`: replace `jira.example.invalid` with the real Jira base URL.
+- `jira_authentication_failed`: confirm Token validity and `JIRA_AUTH_MODE`; Basic authentication also requires `JIRA_EMAIL`.
+- `jira_permission_denied`: confirm Browse Projects and Issue Security access for the Token's account.
+- `jira_issue_not_found`: check the issue key, Jira instance, and whether Jira masks inaccessible issues as 404.
+- `jira_dns_resolution_failed` / `jira_network_unreachable`: check the URL, enterprise network/VPN and DNS; if only the Agent sandbox fails, grant the single read-only collection command network access and retry once.
+- `jira_tls_failed`: install or configure the approved enterprise CA; do not globally disable TLS verification.
 - `vault_not_configured`: set `L05_OBSIDIAN_VAULT` or pass `--vault`.
 - `vault_contract_incomplete`: initialize a new empty Vault, or inspect the existing Vault's `AGENTS.md` compatibility without overwriting it.
 - `profile_missing_code_routing_unavailable`: create `.l05-profile.json`; base diagnosis remains available until code routing is needed.
 - `profile_invalid`: run `l05_profile.py validate` and fix only the reported non-secret field paths.
 - `code_repositories_not_configured`: optional code routing is unavailable; add Repository metadata and rules when needed.
 - Web Clipper captures incomplete content: select the required page sections or use a site-specific template before clipping again.
+## Optional Evidence Providers
+
+For each independently distributed Provider:
+
+1. Read the Provider package README and confirm its read-only boundary.
+2. Run its local Manifest installer.
+3. Add the required credential names to `~/.codex/l05-diagnosis.env` without sharing their values with the Agent.
+4. Add the Provider's non-secret Profile object to `.l05-profile.json`.
+5. Run `l05_profile.py validate`, then use a sanitized fixture or read-only smoke case.
+
+Do not copy an organization's endpoints, field aliases, resource catalog, or routing rules into the public Core Skill.

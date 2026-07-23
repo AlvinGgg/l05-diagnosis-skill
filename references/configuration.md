@@ -29,6 +29,12 @@ The internal Schema is `references/schemas/l05-profile.schema.json`; users norma
 
 Missing Repository entries only limit automatic code routing. Invalid Profile JSON, unsafe paths, unknown routing targets, or secret-shaped fields must be fixed before the Profile is used.
 
+## Optional Evidence Providers
+
+Providers are local optional packages, not bundled enterprise behavior. Install each Provider Manifest under `~/.codex/l05-diagnosis/providers.d/`, keep its credentials in `~/.codex/l05-diagnosis.env`, and add only non-secret routing and settings to the Vault `.l05-profile.json`.
+
+The Core supports `L05_PROVIDER_DIR` to override the Manifest directory for tests or managed installations. Do not put Tokens, passwords, cookies, private keys, or authenticated URLs in the Profile. See `provider-contract.md` and the independent Provider package README.
+
 ## Optional configuration
 
 - `L05_CODE_ROOTS`: explicitly enabled local code roots, separated by the OS path separator.
@@ -36,6 +42,7 @@ Missing Repository entries only limit automatic code routing. Invalid Profile JS
 - `L05_GITHUB_ACTIONS_WORKFLOW_REPO`: optional local workflow Repository.
 - `L05_CACHE_DIR`: cache root for isolated remote Git mirrors.
 - `L05_JIRA_COMMENT_EXCLUDE_REGEX`: automation or system-comment filter override.
+- `L05_PROVIDER_DIR`: optional local Provider Manifest directory override.
 
 Do not define a universal Jira URL, Vault path, code root, Repository, or default branch in the public Skill.
 
@@ -67,4 +74,4 @@ Explicit CLI paths apply only to the current case. Never pass credentials as CLI
 
 ## Failure behavior
 
-Missing Jira access blocks issue understanding and all later diagnosis steps. Missing Vault configuration blocks retrieval. Missing optional code, browser, or attachment access creates an Evidence Gap but does not authorize a substitute write or guess.
+Missing Jira access blocks issue understanding and all later diagnosis steps. The blocked result must include a sanitized technical detail, a stable failure code, and checks specific to configuration, authentication, permission, issue visibility, DNS, TLS, timeout, or service availability. DNS/connection/timeout failures may be retried once with explicit network permission when the Agent runs in a restricted sandbox; authentication and permission failures must not be misreported as network failures. Missing Vault configuration blocks retrieval. Missing optional code, browser, or attachment access creates an Evidence Gap but does not authorize a substitute write or guess.

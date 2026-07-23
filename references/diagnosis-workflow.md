@@ -47,13 +47,34 @@ stronger match evidence.
 Separate fact, inference, and unverified hypothesis. Optional evidence failure
 creates a gap; core Jira/schema failure creates a blocked result.
 
+## Investigation trail
+
+The final answer to the Skill user must list every evidence location actually
+inspected and why it was used. Preserve safe, exact identifiers when available:
+
+- Jira issue plus the fields, comments, attachments, or links reviewed;
+- KB document or historical ticket title and local evidence path;
+- Repository identity, requested/resolved ref or Commit, file path, and symbol;
+- Jenkins controller/job/build URL or other Provider record;
+- Browser page, runtime query, cluster target, or attachment inspected.
+
+Keep the trail separate from the customer-facing Jira reply. Record results
+briefly rather than dumping raw logs. Omit an evidence type entirely when it was
+not used, and never present a planned or failed access as completed inspection.
+
 ## Jira reply draft
 
-When the agent confirms a root cause from current evidence, append the
-ready-to-paste Jira reply defined in `report-format.md`. The reply is a draft
-for human review only; it never performs Jira writeback. The command-line
-report starts at `unresolved`, so it deliberately does not fabricate a reply
-without additional targeted evidence.
+Classify the request before drafting:
+
+- For troubleshooting, append the ready-to-paste Jira reply from
+  `report-format.md` only after current evidence confirms the causal chain.
+- For consultation, a reply may be generated when authoritative documentation
+  or current code supports the general guidance. Clearly separate the stable
+  product rule from ticket-specific values or actions that still need input.
+
+The reply is a draft for human review only; it never performs Jira writeback.
+The command-line report starts at `unresolved`, so it deliberately does not
+fabricate a troubleshooting reply without additional targeted evidence.
 
 ## Publication
 

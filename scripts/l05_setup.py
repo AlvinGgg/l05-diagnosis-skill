@@ -17,6 +17,7 @@ from l05_profile import PROFILE_NAME, load_profile, profile_path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_ROOT = SKILL_ROOT / "assets" / "vault-template"
 DEFAULT_CONFIG = Path(os.environ.get("L05_CONFIG_FILE", Path.home() / ".codex" / "l05-diagnosis.env"))
+DEFAULT_PROVIDER_DIR = Path(os.environ.get("L05_PROVIDER_DIR", Path.home() / ".codex" / "l05-diagnosis/providers.d"))
 ASSIGNMENT_PREFIXES = ("export ", "")
 
 DIRECTORIES = (
@@ -152,6 +153,21 @@ def update_non_secret_config(file: Path, updates: dict[str, str]) -> list[str]:
     file.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
     file.chmod(stat.S_IRUSR | stat.S_IWUSR)
     return sorted(set(changed))
+
+
+def discover_provider_ids(directory: Path = DEFAULT_PROVIDER_DIR) -> set[str]:
+    providers: set[str] = set()
+    if not directory.is_dir():
+        return providers
+    for file in directory.glob("*.json"):
+        try:
+            manifest = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        provider_id = manifest.get("provider_id")
+        if manifest.get("schema_version") == "l05-provider-manifest/v1" and isinstance(provider_id, str):
+            providers.add(provider_id)
+    return providers
 
 
 def initialize(args: argparse.Namespace) -> int:
@@ -298,6 +314,10 @@ def doctor(args: argparse.Namespace) -> int:
 
     repository_count = len(profile.get("code", {}).get("repositories", [])) if profile else 0
     routing_rule_count = len(profile.get("code", {}).get("routing_rules", [])) if profile else 0
+    configured_provider_ids = {item.get("provider_id") for item in profile.get("optional_evidence_providers", []) if isinstance(item, dict) and item.get("enabled", True)} if profile else set()
+    installed_provider_ids = discover_provider_ids()
+    missing_provider_ids = sorted(configured_provider_ids - installed_provider_ids)
+    warnings.extend(f"provider_not_installed:{provider_id}" for provider_id in missing_provider_ids)
 
     result = {
         "status": "ready" if not blockers else "needs_setup",
@@ -316,6 +336,12 @@ def doctor(args: argparse.Namespace) -> int:
             "routing_rule_count": routing_rule_count,
             "code_routing_configured": bool(repository_count and routing_rule_count),
             "errors": profile_validation["errors"],
+        },
+        "providers": {
+            "manifest_directory": str(DEFAULT_PROVIDER_DIR),
+            "configured": sorted(configured_provider_ids),
+            "installed": sorted(installed_provider_ids),
+            "missing": missing_provider_ids,
         },
         "tools": tools,
         "blockers": blockers,

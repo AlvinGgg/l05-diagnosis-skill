@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {spawnSync} from "node:child_process";
 import test from "node:test";
-import {compareFreshness, detectPromptInjection, findKbMatches, parseIssueIdentity, retrievalSeeds, runCase} from "../scripts/run_l05_case.mjs";
+import {classifyJiraCollectionFailure, compareFreshness, detectPromptInjection, findKbMatches, parseIssueIdentity, retrievalSeeds, runCase} from "../scripts/run_l05_case.mjs";
 
 const FIXTURE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures/jira-fixture.json");
 
@@ -130,10 +130,29 @@ test("offline fixture creates isolated case, uses source evidence, and preserves
   const result = await runCase({issue: "DEMO-3", baseUrl: "https://jira.example.test", kbRoot, fixture: FIXTURE, attachmentMode: "metadata-only", keepTemp: true});
   assert.equal(result.status, "complete");
   assert.ok(result.kb_matches.some((item) => item.source_type === "jira_source_page"));
-  for (const heading of ["Collection status", "Ticket facts", "Timeline", "Local KB matches and freshness", "Evidence inspected", "Hypotheses with supporting and contradicting evidence", "Root cause assessment", "Recommended change", "Verification plan", "Access and evidence gaps", "Optional KB publish result", "Jira reply draft"]) assert(result.report.includes(`## ${heading}`));
+  for (const heading of ["Collection status", "Ticket facts", "Timeline", "Local KB matches and freshness", "Investigation trail", "Evidence inspected", "Hypotheses with supporting and contradicting evidence", "Root cause assessment", "Recommended change", "Verification plan", "Access and evidence gaps", "Optional KB publish result", "Jira reply draft"]) assert(result.report.includes(`## ${heading}`));
+  assert.match(result.report, /Jira DEMO-3: collected current issue fields/);
+  assert.match(result.report, /KB .*demo\.md: matched by/);
   assert.match(result.report, /Not generated: root cause is unresolved/);
   assert.match(result.report, /jira_source_page \/ high \/ stale/);
   assert.equal(fs.existsSync(path.join(result.case_dir, "issue.normalized.json")), true);
+});
+
+test("offline case renders current optional Provider evidence with provenance owner", async () => {
+  const kbRoot = testKb();
+  const profile = JSON.parse(fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/vault-template/.l05-profile.json"), "utf8"));
+  profile.optional_evidence_providers = [{provider_id: "fixture", enabled: true, capabilities: ["ci.build.resolve"], match: {keywords: ["collector"], match_mode: "any"}, config: {}}];
+  fs.writeFileSync(path.join(kbRoot, ".l05-profile.json"), JSON.stringify(profile));
+  const providerDir = fs.mkdtempSync(path.join(os.tmpdir(), "l05-case-provider-"));
+  const providerScript = path.join(providerDir, "fixture-provider.mjs");
+  fs.writeFileSync(providerScript, `process.stdin.resume(); process.stdin.on("end", () => process.stdout.write(JSON.stringify({schema_version:"l05-provider-response/v1",provider_id:"fixture",status:"ok",evidence_records:[{capability:"ci.build.resolve",evidence_type:"fixture",summary:"Current build resolved",confidence:"confirmed",data:{build_number:17,marker:"sanitized failure marker"},provenance:{access_mode:"read-only"}}],candidates:[],gaps:[]})));`);
+  fs.writeFileSync(path.join(providerDir, "fixture.json"), JSON.stringify({schema_version: "l05-provider-manifest/v1", provider_id: "fixture", display_name: "Fixture", command: [process.execPath, providerScript], capabilities: ["ci.build.resolve"], request_schema: "l05-provider-request/v1", response_schema: "l05-provider-response/v1"}));
+  const result = await runCase({issue: "DEMO-3", baseUrl: "https://jira.example.test", kbRoot, fixture: FIXTURE, providerDir});
+  assert.equal(result.status, "complete");
+  assert.match(result.report, /fixture \/ ci\.build\.resolve \/ confirmed: Current build resolved/);
+  assert.match(result.report, /"build_number": 17/);
+  assert.match(result.report, /sanitized failure marker/);
+  assert.equal(result.provider_evidence.responses[0].provider_id, "fixture");
 });
 
 test("CLI loads Jira and Vault settings from the private configuration file", () => {
@@ -167,6 +186,45 @@ test("unavailable Jira blocks before any KB retrieval", async () => {
   assert.equal(result.status, "blocked");
   assert.equal(result.diagnosis_allowed, false);
   assert.equal("kb_matches" in result, false);
+  assert.equal(result.stage, "jira_collection");
+  assert.match(result.reason_code, /^jira_/);
+  assert.ok(result.technical_detail);
+  assert.ok(result.checks.length >= 2);
+});
+
+test("Jira collection failures expose actionable, secret-safe categories", () => {
+  const dns = classifyJiraCollectionFailure("fetch failed (getaddrinfo ENOTFOUND jira.example.test)");
+  assert.equal(dns.reason_code, "jira_dns_resolution_failed");
+  assert.equal(dns.retry_with_network_permission, true);
+  assert.match(dns.technical_detail, /ENOTFOUND jira\.example\.test/);
+  assert.ok(dns.checks.some((item) => item.includes("网络权限")));
+
+  const auth = classifyJiraCollectionFailure("Jira HTTP 401 Authorization: Bearer private-fixture-token token=private-fixture-token");
+  assert.equal(auth.reason_code, "jira_authentication_failed");
+  assert.doesNotMatch(JSON.stringify(auth), /private-fixture-token/);
+
+  const permission = classifyJiraCollectionFailure("Jira HTTP 403");
+  assert.equal(permission.reason_code, "jira_permission_denied");
+  assert.ok(permission.checks.some((item) => item.includes("Browse Projects")));
+});
+
+test("Jira reply contract covers supported consultation and confirmed troubleshooting", () => {
+  const contract = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "../references/report-format.md"), "utf8");
+  for (const required of [
+    "Consultation reply",
+    "Troubleshooting reply",
+    "smallest valid example",
+    "original source",
+    "相关参考文档",
+    "【排查与证据】",
+    "【根因与结论】",
+    "Do not repeat dates",
+    "Investigation trail",
+    "Jenkins `<job or build URL>`",
+  ]) assert.ok(contract.includes(required), `reply contract is missing: ${required}`);
+  assert.match(contract, /authoritative documentation or\s+current code supports the general answer/);
+  assert.match(contract, /one to\s+three titled source links/);
+  assert.match(contract, /do not state that the issue is resolved/);
 });
 
 test("golden regression fixtures define non-execution boundaries", () => {

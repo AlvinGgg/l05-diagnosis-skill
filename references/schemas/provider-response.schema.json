@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "L05 Provider Response",
+  "type": "object",
+  "required": ["schema_version", "provider_id", "status", "evidence_records", "gaps"],
+  "properties": {
+    "schema_version": {"const": "l05-provider-response/v1"},
+    "provider_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ok", "partial", "no_match", "blocked"]},
+    "evidence_records": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["capability", "evidence_type", "summary", "confidence", "provenance"],
+        "properties": {
+          "capability": {"type": "string"},
+          "evidence_type": {"type": "string"},
+          "summary": {"type": "string"},
+          "confidence": {"enum": ["confirmed", "probable", "candidate", "unknown"]},
+          "provenance": {"type": "object"}
+        }
+      }
+    },
+    "candidates": {"type": "array"},
+    "gaps": {"type": "array", "items": {"type": "string"}}
+  }
+}

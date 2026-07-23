@@ -34,7 +34,7 @@ export class IssueNormalizer {
       const target = issueLink.outwardIssue || issueLink.inwardIssue;
       if (target?.key) links.add(`${this.baseUrl}/browse/${target.key}`, "issue-link", "jira-issue-link");
     }
-    const source = {base_url: this.baseUrl, deployment_type: this.deploymentType, issue_id: String(issue.id || issue.key), issue_key: issue.key, browse_url: `${this.baseUrl}/browse/${issue.key}`, fetched_at: fetchedAt, issue_updated_at: fields.updated || fetchedAt};
+    const source = {base_url: this.baseUrl, deployment_type: this.deploymentType, issue_id: String(issue.id || issue.key), issue_key: issue.key, browse_url: `${this.baseUrl}/browse/${issue.key}`, fetched_at: fetchedAt, issue_created_at: fields.created || "", issue_updated_at: fields.updated || fetchedAt};
     const value = redactObject({
       schema_version: "1.0.0",
       source,

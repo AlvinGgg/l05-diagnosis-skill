@@ -36,6 +36,7 @@ KNOWLEDGE_REQUIRED = (
     "quality_reports",
 )
 SELECTOR_KEYS = ("problem_types", "keywords", "components")
+PROVIDER_CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,6 +200,39 @@ def validate_profile(profile: Any) -> dict[str, Any]:
         warnings.append(error("code_repositories_not_configured", "$.code.repositories"))
     if repositories and not routing_rules:
         warnings.append(error("code_routing_rules_not_configured", "$.code.routing_rules"))
+
+    providers = profile.get("optional_evidence_providers", [])
+    if not isinstance(providers, list):
+        errors.append(error("optional_evidence_providers_must_be_array", "$.optional_evidence_providers"))
+        providers = []
+    provider_ids: set[str] = set()
+    for index, provider in enumerate(providers):
+        base = f"$.optional_evidence_providers[{index}]"
+        if not isinstance(provider, dict):
+            errors.append(error("provider_configuration_must_be_object", base))
+            continue
+        provider_id = provider.get("provider_id")
+        if not isinstance(provider_id, str) or not ID_PATTERN.fullmatch(provider_id):
+            errors.append(error("provider_id_is_invalid", f"{base}.provider_id"))
+        elif provider_id in provider_ids:
+            errors.append(error("provider_id_must_be_unique", f"{base}.provider_id"))
+        else:
+            provider_ids.add(provider_id)
+        capabilities = provider.get("capabilities")
+        if not isinstance(capabilities, list) or not capabilities or any(not isinstance(item, str) or not PROVIDER_CAPABILITY_PATTERN.fullmatch(item) for item in capabilities):
+            errors.append(error("provider_capabilities_are_invalid", f"{base}.capabilities"))
+        match = provider.get("match")
+        if not isinstance(match, dict) or not any(match.get(key) for key in SELECTOR_KEYS):
+            errors.append(error("provider_match_requires_a_selector", f"{base}.match"))
+        else:
+            for key in SELECTOR_KEYS:
+                values = match.get(key, [])
+                if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values):
+                    errors.append(error("provider_selector_must_be_string_array", f"{base}.match.{key}"))
+            if match.get("match_mode", "all") not in ("all", "any"):
+                errors.append(error("provider_match_mode_is_invalid", f"{base}.match.match_mode"))
+        if not isinstance(provider.get("config"), dict):
+            errors.append(error("provider_config_must_be_object", f"{base}.config"))
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
@@ -282,6 +316,7 @@ def main() -> int:
                     **validation,
                     "repository_count": len(profile.get("code", {}).get("repositories", [])) if profile else 0,
                     "routing_rule_count": len(profile.get("code", {}).get("routing_rules", [])) if profile else 0,
+                    "provider_count": len(profile.get("optional_evidence_providers", [])) if profile else 0,
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "L05 Provider Request",
+  "type": "object",
+  "required": ["schema_version", "request_id", "provider_id", "capabilities", "issue", "context", "config"],
+  "properties": {
+    "schema_version": {"const": "l05-provider-request/v1"},
+    "request_id": {"type": "string", "minLength": 1},
+    "provider_id": {"type": "string", "minLength": 1},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "issue": {"type": "object"},
+    "context": {"type": "object"},
+    "config": {"type": "object"}
+  }
+}

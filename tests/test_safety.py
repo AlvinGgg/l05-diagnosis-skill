@@ -172,6 +172,7 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(report["jira_token_configured"], True)
             self.assertEqual(report["profile"]["status"], "valid")
             self.assertEqual(report["profile"]["code_routing_configured"], False)
+            self.assertEqual(report["providers"]["configured"], [])
             self.assertIn("code_repositories_not_configured", report["warnings"])
             self.assertNotIn("fixture-private-value", result.stdout)
 
@@ -232,6 +233,24 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(validation["valid"], False)
         self.assertIn("profile_must_not_contain_secret_fields", codes)
         self.assertIn("repository_url_is_invalid_or_contains_credentials", codes)
+
+    def test_profile_accepts_generic_provider_routing_and_rejects_provider_secrets(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        profile["optional_evidence_providers"] = [
+            {
+                "provider_id": "ci-evidence",
+                "enabled": True,
+                "capabilities": ["ci.build.resolve"],
+                "match": {"problem_types": ["cicd.*"], "match_mode": "any"},
+                "config": {"controller": "https://ci.example.test", "tls_verify": True},
+            }
+        ]
+        self.assertTrue(validate_profile(profile)["valid"])
+        profile["optional_evidence_providers"][0]["config"]["access_token"] = "fixture-secret"
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("profile_must_not_contain_secret_fields", {item["code"] for item in validation["errors"]})
 
     def test_configure_updates_only_non_secret_values(self):
         skill = Path(__file__).resolve().parents[1]

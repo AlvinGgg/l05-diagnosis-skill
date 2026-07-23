@@ -10,6 +10,7 @@ import {BundleWriter} from "./vendor/jira-collector/bundle-writer.mjs";
 import {loadMissingL05ConfigEnv} from "./vendor/jira-collector/env-loader.mjs";
 import {normalizedContentHash, validateBundle} from "./vendor/jira-collector/validate-jira-bundle.mjs";
 import {evaluateBundle} from "./vendor/ticket-quality/evaluate-jira-ticket-quality.mjs";
+import {collectOptionalEvidence} from "./provider-loader.mjs";
 
 const SKILL_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const COLLECTOR_CLI = path.join(SKILL_ROOT, "scripts/vendor/jira-collector/jira-collect.mjs");
@@ -27,6 +28,169 @@ export function parseIssueIdentity(value, baseUrl = "") {
 }
 export function detectPromptInjection(text) { return INJECTION_RE.test(text || ""); }
 
+function sanitizeFailureDetail(value) {
+  return String(value || "")
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
+    .replace(/Basic\s+[^\s"']+/gi, "Basic [redacted]")
+    .replace(/\b(JIRA_TOKEN|JIRA_EMAIL|password|secret|token|signature)\s*=\s*[^\s&]+/gi, "$1=[redacted]")
+    .replace(/([?&](?:password|secret|token|signature)=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/https?:\/\/[^/\s:@]+:[^@\s/]+@/gi, "https://[redacted]@")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 800);
+}
+
+export function classifyJiraCollectionFailure(value) {
+  const detail = sanitizeFailureDetail(value) || "Jira collector returned no usable issue facts.";
+  const definitions = [
+    {
+      code: "jira_token_missing",
+      match: /token_missing|missing JIRA_TOKEN|JIRA_TOKEN is required/i,
+      reason: "Jira Token 未配置，当前请求无法认证。",
+      checks: [
+        "运行 l05_setup.py doctor，确认 jira_token_configured 为 true。",
+        "检查进程环境或 ~/.codex/l05-diagnosis.env 中是否存在非空 JIRA_TOKEN；配置必须是字面量赋值。",
+        "不要在对话、命令行、仓库或 Vault 中粘贴 Token。",
+      ],
+    },
+    {
+      code: "jira_base_url_missing",
+      match: /JIRA_BASE_URL.*required|base URL.*required/i,
+      reason: "Jira Base URL 未配置。",
+      checks: [
+        "运行 l05_setup.py doctor，确认 jira_base_url_configured 为 true。",
+        "检查 JIRA_BASE_URL 是否指向正确的 Jira 站点根地址，且不包含 browse 路径。",
+      ],
+    },
+    {
+      code: "jira_auth_configuration_invalid",
+      match: /invalid --auth-mode|JIRA_EMAIL.*required|basic authentication/i,
+      reason: "Jira 认证模式配置不完整或不受支持。",
+      checks: [
+        "确认 JIRA_AUTH_MODE 为 bearer 或 basic。",
+        "使用 basic 时同时配置 JIRA_EMAIL；使用 PAT/Bearer 时确认模式与 Jira 实例要求一致。",
+      ],
+    },
+    {
+      code: "jira_authentication_failed",
+      match: /Jira HTTP 401|\bHTTP 401\b/i,
+      reason: "Jira 已拒绝认证，Token 可能失效或认证模式不匹配。",
+      checks: [
+        "确认本地 Token 尚未过期、未撤销，并属于预期 Jira 账号。",
+        "核对 JIRA_AUTH_MODE；basic 认证还需要正确的 JIRA_EMAIL。",
+        "运行 l05_setup.py doctor 只检查配置存在性；它不会打印或验证 Token 内容。",
+      ],
+    },
+    {
+      code: "jira_permission_denied",
+      match: /Jira HTTP 403|\bHTTP 403\b/i,
+      reason: "Jira 已认证但拒绝当前只读请求。",
+      checks: [
+        "确认 Token 对应账号具有目标项目的 Browse Projects 权限。",
+        "检查工单 Issue Security Level、服务台参与者或组织范围是否限制了该账号。",
+        "确认访问的是正确 Jira 实例；不要通过增加写权限解决只读访问问题。",
+      ],
+    },
+    {
+      code: "jira_issue_not_found",
+      match: /Jira HTTP 404|\bHTTP 404\b/i,
+      reason: "Jira 未返回目标工单；工单号、实例或可见范围可能不正确。",
+      checks: [
+        "核对工单号和 JIRA_BASE_URL。",
+        "用同一账号在 Jira UI 中确认工单可见；部分 Jira 会用 404 隐藏无权限资源。",
+      ],
+    },
+    {
+      code: "jira_rate_limited",
+      match: /Jira HTTP 429|\bHTTP 429\b/i,
+      reason: "Jira API 当前触发限流。",
+      checks: [
+        "等待 Retry-After 指定时间后重试。",
+        "确认没有并行运行大量工单采集任务。",
+      ],
+    },
+    {
+      code: "jira_service_unavailable",
+      match: /Jira HTTP 5\d\d|\bHTTP 5\d\d\b/i,
+      reason: "Jira 或其反向代理当前返回服务端错误。",
+      checks: [
+        "检查 Jira 服务状态或稍后重试一次。",
+        "若浏览器可用但 API 持续失败，记录 HTTP 状态并联系 Jira 平台维护方。",
+      ],
+    },
+    {
+      code: "jira_dns_resolution_failed",
+      match: /ENOTFOUND|EAI_AGAIN|getaddrinfo|name or service not known|nodename nor servname/i,
+      reason: "执行环境无法解析 Jira 域名，请求尚未到达 Jira。",
+      retry_with_network_permission: true,
+      checks: [
+        "核对 JIRA_BASE_URL 中的域名是否拼写正确。",
+        "确认当前设备已连接所需企业网络或 VPN，系统 DNS 能解析该域名。",
+        "如果只在受限 Agent/Codex 环境失败，请授予该次只读命令网络权限后重试；不要更换 Token。",
+      ],
+    },
+    {
+      code: "jira_tls_failed",
+      match: /certificate|CERT_|SELF_SIGNED|unable to verify|TLS|SSL/i,
+      reason: "Jira TLS 证书校验失败，请求未完成。",
+      checks: [
+        "确认系统信任企业 CA，或通过 NODE_EXTRA_CA_CERTS 配置受信任 CA 文件。",
+        "核对 JIRA_BASE_URL 的主机名与证书是否匹配。",
+        "不要全局关闭 TLS 校验；仅按组织批准的主机级策略处理。",
+      ],
+    },
+    {
+      code: "jira_request_timeout",
+      match: /AbortError|TIMEOUT|timed? out|ETIMEDOUT/i,
+      reason: "Jira 请求超时，未取得工单事实。",
+      retry_with_network_permission: true,
+      checks: [
+        "检查 VPN、代理、防火墙和 Jira 服务状态。",
+        "如果执行环境限制外部网络，请授予该次只读请求网络权限后重试一次。",
+      ],
+    },
+    {
+      code: "jira_network_unreachable",
+      match: /fetch failed|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|socket hang up/i,
+      reason: "执行环境无法连接 Jira，请求未取得 HTTP 响应。",
+      retry_with_network_permission: true,
+      checks: [
+        "检查企业网络、VPN、代理、防火墙和 Jira 域名可达性。",
+        "如果同一地址在浏览器或本机终端可用，但 Agent 中失败，请授予该次只读命令网络权限后重试。",
+        "没有 HTTP 401/403 时不要优先重置 Token。",
+      ],
+    },
+    {
+      code: "jira_response_invalid",
+      match: /invalid JSON|no bundle path|bundle validation failed|schema/i,
+      reason: "Jira 返回或采集产物不符合预期，无法作为诊断事实使用。",
+      checks: [
+        "确认 Jira API 没有被 SSO 登录页或代理错误页替代。",
+        "保留脱敏后的错误和 HTTP 状态，检查 Jira API 版本与 Collector 兼容性。",
+      ],
+    },
+  ];
+  const match = definitions.find((item) => item.match.test(detail));
+  const fallback = {
+    code: "jira_collection_failed",
+    reason: "Jira 工单采集失败，尚未取得可用于诊断的当前事实。",
+    checks: [
+      "运行 l05_setup.py doctor 检查 Jira URL、Token 是否已配置以及本地 Vault 是否就绪。",
+      "检查当前账号在 Jira UI 中能否查看该工单，并核对网络、VPN、代理与 Jira 服务状态。",
+      "保留下面的脱敏技术详情用于定位，但不要在对话中提供 Token。",
+    ],
+  };
+  const selected = match || fallback;
+  return {
+    stage: "jira_collection",
+    reason_code: selected.code,
+    reason: selected.reason,
+    technical_detail: detail,
+    checks: selected.checks,
+    retry_with_network_permission: selected.retry_with_network_permission === true,
+  };
+}
+
 function collectorCli() {
   if (!fs.existsSync(COLLECTOR_CLI)) throw new Error("bundled Jira collector is missing");
   return COLLECTOR_CLI;
@@ -43,7 +207,12 @@ async function runCollector({identity, fixture, attachmentMode, caseDir}) {
     return result;
   } catch (error) {
     const stdout = error.stdout?.trim();
-    if (stdout) return JSON.parse(stdout);
+    if (stdout) {
+      const result = JSON.parse(stdout);
+      if (error.stderr?.trim()) result.stderr = sanitizeFailureDetail(error.stderr);
+      result.exit_code = error.code;
+      return result;
+    }
     throw new Error(`collector failed: ${String(error.stderr || error.message).replace(/Bearer\s+\S+/gi, "Bearer [redacted]")}`);
   }
 }
@@ -61,43 +230,67 @@ function readVaultContract(kbRoot) {
   };
 }
 
-function evidenceGaps(issue, injection, vaultContract) {
+function evidenceGaps(issue, injection, vaultContract, providerEvidence = null) {
   const gaps = [];
   if (issue.collection.permission_gaps?.length) gaps.push(...issue.collection.permission_gaps);
   for (const [step, value] of Object.entries(issue.collection.steps || {})) if (!["complete", undefined].includes(value.status)) gaps.push(`${step}:${value.status}`);
   if (injection) gaps.push("prompt-injection-text-detected-and-ignored");
   gaps.push(...(vaultContract?.gaps || []));
+  gaps.push(...(providerEvidence?.gaps || []));
   return gaps;
 }
 
-function hypotheses(issue, matches) {
+function hypotheses(issue, matches, providerEvidence = null) {
+  const providerSupport = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => `Current Provider evidence: ${response.provider_id}/${record.capability}: ${record.summary}`));
   return [{
-    hypothesis: "No current root cause is confirmed from collection and historical precedent alone.",
-    supporting_evidence: ["Current Jira normalized facts were collected.", ...matches.slice(0, 3).map((item) => `Historical precedent: ${item.evidence_path}`)],
-    contradicting_evidence: ["No targeted current code, attachment, link, browser, or runtime evidence was collected by this command."],
-    missing_evidence: ["Current error log, exact environment, and the narrow implementation or runtime evidence that tests a hypothesis."],
+    hypothesis: "No current root cause is confirmed by the collected evidence yet.",
+    supporting_evidence: ["Current Jira normalized facts were collected.", ...providerSupport.slice(0, 6), ...matches.slice(0, 3).map((item) => `Historical precedent: ${item.evidence_path}`)],
+    contradicting_evidence: [providerSupport.length ? "Provider records are observations and do not by themselves prove the complete causal chain." : "No targeted current Provider, code, attachment, link, browser, or runtime evidence was collected by this command."],
+    missing_evidence: ["The narrow current code, configuration, or runtime evidence needed to establish the complete causal chain."],
     confidence: "unresolved"
   }];
 }
 
-function reportFor(issue, matches, injection, vaultContract, publishResult = null) {
+function reportFor(issue, matches, injection, vaultContract, providerEvidence = null, publishResult = null) {
   const timeline = [`- ${issue.source.issue_updated_at}: Jira issue updated`, ...(issue.comments || []).map((comment) => `- ${comment.created}: comment ${comment.id}`)].join("\n") || "- No comments collected.";
   const matchLines = matches.map((item) => `- ${item.source_type} / ${item.quality_level} / ${item.freshness} / ${item.match_reason.join(", ")}: ${item.evidence_path}`).join("\n") || "- No matching local precedent.";
-  const gaps = evidenceGaps(issue, injection, vaultContract);
-  const structuredHypotheses = hypotheses(issue, matches);
-  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Timeline\n\n${timeline}\n\n## Local KB matches and freshness\n\n${matchLines}\n\n## Evidence inspected\n\n- Current normalized Jira bundle\n- Local evidence paths listed above\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical evidence is precedent and cannot confirm the current root cause without targeted current evidence.\n\n## Recommended change\n\nCollect the narrow current log, configuration, code, or runtime evidence needed to test the leading hypothesis. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nReproduce safely, inspect the relevant current configuration/code/runtime evidence, apply a human-reviewed change, and verify regression behavior in the affected environment.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
+  const providerLines = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `- ${provider_id} / ${record.capability || "unknown"} / ${record.confidence || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}`).join("\n") || "- No optional Provider evidence collected.";
+  const providerDetails = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).filter((record) => record.data !== undefined).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `### ${provider_id} / ${record.capability || "unknown"}\n\n${JSON.stringify(record.data, null, 2).split("\n").map((line) => `    ${line}`).join("\n")}`).join("\n\n") || "- No optional Provider detail available.";
+  const investigationTrail = [
+    `Jira ${issue.source.issue_key}: collected current issue fields and ${issue.comments?.length || 0} user comments.`,
+    ...matches.map((item) => `KB ${item.evidence_path}: matched by ${item.match_reason.join(", ")}; quality=${item.quality_level}, freshness=${item.freshness}.`),
+    ...(providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => `Provider ${response.provider_id} / ${record.capability || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}.`)),
+  ].map((item, index) => `${index + 1}. ${item}`).join("\n");
+  const inspectedEvidence = [
+    "- Current normalized Jira bundle",
+    ...(matches.length ? ["- Local evidence paths listed above"] : []),
+    ...((providerEvidence?.responses || []).some((response) => response.evidence_records?.length) ? ["- Optional Provider records listed above"] : []),
+  ].join("\n");
+  const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
+  const structuredHypotheses = hypotheses(issue, matches, providerEvidence);
+  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Timeline\n\n${timeline}\n\n## Local KB matches and freshness\n\n${matchLines}\n\n## Optional Provider evidence\n\n${providerLines}\n\n## Optional Provider evidence details\n\n${providerDetails}\n\n## Investigation trail\n\n${investigationTrail}\n\n## Evidence inspected\n\n${inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.\n\n## Recommended change\n\nCollect the narrow current log, configuration, code, or runtime evidence needed to test the leading hypothesis. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nReproduce safely, inspect the relevant current configuration/code/runtime evidence, apply a human-reviewed change, and verify regression behavior in the affected environment.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
 }
 
-export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode = "metadata-only", caseDir, keepTemp = false, publishToKb = false}) {
+export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode = "metadata-only", caseDir, keepTemp = false, publishToKb = false, providerDir}) {
   if (!kbRoot) return {status: "blocked", reason: "knowledge vault is not configured; run l05_setup.py doctor", diagnosis_allowed: false};
-  const identity = parseIssueIdentity(issue, baseUrl);
+  let identity;
+  try { identity = parseIssueIdentity(issue, baseUrl); }
+  catch (error) {
+    const failure = classifyJiraCollectionFailure(error.message);
+    return {status: "blocked", issue_key: null, ...failure, diagnosis_allowed: false, case_dir: null};
+  }
   const temporary = !caseDir;
   const root = caseDir ? path.resolve(caseDir) : fs.mkdtempSync(path.join(os.tmpdir(), "l05-case-"));
   fs.mkdirSync(root, {recursive: true});
   let collectorResult;
+  let stage = "jira_collection";
   try {
     collectorResult = await runCollector({identity, fixture, attachmentMode, caseDir: caseDir ? root : null});
-    if (collectorResult.status !== "ok" && collectorResult.status !== "partial") throw new Error(collectorResult.issues?.[0]?.warnings?.join(", ") || "collector core issue failed");
+    if (collectorResult.status !== "ok" && collectorResult.status !== "partial") {
+      const detail = [collectorResult.issues?.[0]?.warnings?.join(", "), collectorResult.stderr].filter(Boolean).join("; ") || "collector core issue failed";
+      const failure = classifyJiraCollectionFailure(detail);
+      return {status: "blocked", issue_key: identity.issue_key, ...failure, diagnosis_allowed: false, case_dir: keepTemp || !temporary ? root : null};
+    }
     const collection = {bundle: collectorResult.issues?.[0]?.bundle_path};
     if (!collection.bundle || !fs.existsSync(collection.bundle)) throw new Error("collector returned no bundle path");
     const validation = validateBundle(collection.bundle);
@@ -106,10 +299,13 @@ export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode =
     const normalized = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
     fs.copyFileSync(path.join(collection.bundle, "ticket.md"), path.join(root, "issue.md"));
     fs.copyFileSync(normalizedPath, path.join(root, "issue.normalized.json"));
+    stage = "vault_retrieval";
     const vaultContract = readVaultContract(kbRoot);
     const matches = findKbMatches(kbRoot, normalized, normalized.source.issue_updated_at);
+    const seedDetails = extractRetrievalSeedDetails(normalized);
+    const providerEvidence = await collectOptionalEvidence({kbRoot, issue: normalized, retrievalSeedDetails: seedDetails, providerDir});
     const injection = detectPromptInjection(`${normalized.ticket.description_markdown}\n${normalized.comments.map((item) => item.body_markdown).join("\n")}`);
-    let report = reportFor(normalized, matches, injection, vaultContract);
+    let report = reportFor(normalized, matches, injection, vaultContract, providerEvidence);
     let publishResult = null;
     if (publishToKb) {
       const candidate = structuredClone(normalized);
@@ -118,14 +314,18 @@ export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode =
       candidate.content_hash = normalizedContentHash(candidate);
       publishResult = new BundleWriter({outputRoot: path.join(kbRoot, "inbox/jira"), collectorName: "l05-diagnosis", collectorVersion: "2.0.0"}).write({rawIssue: {source: candidate.source, retained_in_temporary_case_only: true}, normalized: candidate, attachmentFiles: new Map()});
       publishResult.quality = evaluateBundle(publishResult.bundle, {vault: kbRoot, outputDir: path.join(kbRoot, "system/reports/jira-quality")});
-      report = reportFor(candidate, matches, injection, vaultContract, publishResult);
+      report = reportFor(candidate, matches, injection, vaultContract, providerEvidence, publishResult);
     }
-    const summary = {issue_key: normalized.source.issue_key, collection_status: normalized.collection, vault_contract: vaultContract, kb_matches: matches, retrieval_seeds: retrievalSeeds(normalized), retrieval_seed_details: extractRetrievalSeedDetails(normalized), prompt_injection_detected: injection, hypotheses: hypotheses(normalized, matches), publish_result: publishResult};
+    const summary = {issue_key: normalized.source.issue_key, collection_status: normalized.collection, vault_contract: vaultContract, kb_matches: matches, retrieval_seeds: retrievalSeeds(normalized), retrieval_seed_details: seedDetails, optional_provider_evidence: providerEvidence, prompt_injection_detected: injection, hypotheses: hypotheses(normalized, matches, providerEvidence), publish_result: publishResult};
     fs.writeFileSync(path.join(root, "diagnosis.md"), report);
     fs.writeFileSync(path.join(root, "case-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
-    return {status: "complete", issue_key: normalized.source.issue_key, report, case_dir: keepTemp || !temporary ? root : null, bundle: keepTemp || !temporary ? collection.bundle : null, kb_matches: matches, publish_result: publishResult};
+    return {status: "complete", issue_key: normalized.source.issue_key, report, case_dir: keepTemp || !temporary ? root : null, bundle: keepTemp || !temporary ? collection.bundle : null, kb_matches: matches, provider_evidence: providerEvidence, publish_result: publishResult};
   } catch (error) {
-    return {status: "blocked", issue_key: identity.issue_key, reason: error.message, diagnosis_allowed: false, case_dir: keepTemp || !temporary ? root : null};
+    if (stage === "jira_collection") {
+      const failure = classifyJiraCollectionFailure(error.message);
+      return {status: "blocked", issue_key: identity.issue_key, ...failure, diagnosis_allowed: false, case_dir: keepTemp || !temporary ? root : null};
+    }
+    return {status: "blocked", issue_key: identity.issue_key, stage, reason: sanitizeFailureDetail(error.message), diagnosis_allowed: false, case_dir: keepTemp || !temporary ? root : null};
   } finally {
     if (collectorResult?.output_root && !keepTemp) {
       try { await execFileAsync(process.execPath, [collectorCli(), "cleanup", collectorResult.output_root], {env: {...process.env}, maxBuffer: 1024 * 1024}); } catch {}
