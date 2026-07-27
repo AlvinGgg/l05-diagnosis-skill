@@ -1,8 +1,8 @@
 # l05-diagnosis
 
-一个面向 Jira 支持工单的 L0.5 初诊 Skill。它先获取当前工单事实，再结合本地 Obsidian 知识库、历史工单和按需代码证据形成可追溯的诊断结论。
+一个面向 Jira 支持工单的 L0.5 处理 Skill。它先获取当前工单事实并判断是问题排查、需求实现、混合还是意图不明，再结合本地 Obsidian 知识库、历史工单和按需代码证据形成可追溯的诊断结论或 SRE 人工处理 runbook。
 
-本项目不是自动回复机器人，也不会替代 SRE 做生产变更。它的目标是缩短信息收集和初步排查时间，提高一次解决率，并把经人工审核的处理经验沉淀为后续可复用的知识。
+本项目不是自动回复机器人，也不会替代 SRE 做生产变更。它的目标是缩短信息收集、问题初诊和需求方案准备时间，提高一次解决率，并把经人工审核的处理经验沉淀为后续可复用的知识。
 
 ## 核心设计
 
@@ -11,26 +11,33 @@ flowchart TD
     U["用户提供 Jira 工单号或 URL"] --> G["配置与安全检查"]
     G --> J["只读采集当前 Jira 事实"]
     J -->|失败| B["阻塞并返回缺失配置或访问问题"]
-    J -->|成功| Q["理解问题并生成安全检索词"]
-    Q --> K["检索 Obsidian 知识库"]
-    Q --> E["按需检查附件、链接、浏览器或运行时证据"]
-    Q --> O["按 Profile 路由可选 Evidence Provider"]
-    Q --> C["按需获取隔离的远程代码快照"]
+    J -->|成功| I{"意图路由"}
+    I -->|意图不明| A["生成用户补充信息草稿并停止"]
+    I -->|问题排查| Q["形成可验证假设"]
+    I -->|需求实现| F["确认目标状态与待确认项"]
+    I -->|混合| M["拆分并标记依赖"]
+    Q --> K["检索诊断证据"]
+    F --> K2["检索方案、参数、验证与回滚依据"]
+    M --> K
+    M --> K2
+    K --> E["按需检查附件、代码、Provider 或运行时证据"]
+    K2 --> E
     K --> R["证据分级与根因判断"]
     E --> R
-    O --> R
-    C --> R
     R --> D["结构化诊断报告"]
+    K2 --> S["SRE runbook、验证、回滚与完成后回复模板"]
     R -->|根因已确认| P["生成可直接粘贴到 Jira 的中文回复草稿"]
-    D -->|明确授权后| I["生成脱敏的知识库 Inbox 候选"]
+    D -->|明确授权后| N["生成脱敏的知识库 Inbox 候选"]
+    S -->|明确授权后| N
 ```
 
 ### 关键原则
 
 - **先理解工单，再诊断**：Jira 采集失败时立即停止，不使用历史相似案例猜测当前问题。
+- **先判断意图，再展开证据**：需求实现不输出根因语义；意图不明先询问最小必要信息。
 - **当前事实优先**：当前 Jira 内容是现状依据，历史工单和 Wiki 只作为先例或背景。
 - **证据可追溯**：区分观察事实、历史先例、推断和缺失信息，并记录来源与新鲜度。
-- **能力可插拔**：Core 只提供通用 Provider Loader；Jenkins、Loki、CMDB 等能力由独立包和组织 Profile 引入。
+- **能力可插拔**：Core 只提供通用 Provider Loader；Jenkins、Kubectl、Loki、CMDB 等能力由独立包和组织 Profile 引入。
 
 ## 可选 Evidence Provider
 
@@ -39,8 +46,13 @@ flowchart TD
 - 非秘密配置：`<vault>/.l05-profile.json`
 
 Provider 未安装、无权限或无匹配结果时，只记录 Evidence Gap，不影响 Jira 和 Vault 主流程。安装和契约说明见 `references/provider-contract.md` 与对应独立 Provider 的 README。
+
+已实现的独立本地 Provider 包括 Jenkins 构建证据和 Kubectl 只读
+Kubernetes 证据。Kubectl Provider 只接受由安装器写入私有策略并锁定的
+kubeconfig 路径，不开放自由命令，不读取 Secret，也不执行集群写操作。
+
 - **默认只读**：不会评论、转派、变更状态或执行其他 Jira 写操作。
-- **人工审核**：只有根因得到当前证据确认时，才生成完整 Jira 回复草稿。
+- **人工审核**：问题类只有根因得到当前证据确认时才生成完整回复；需求类只有执行和验证证据齐全后才生成可发送的完成回复。
 - **知识发布受控**：只有用户明确授权后，才在 Vault 的 Inbox 中生成脱敏候选；不会自动晋升为正式知识。
 - **代码隔离**：远程仓库使用独立 Mirror 和临时 detached Worktree，不修改用户已有仓库。
 
@@ -54,10 +66,11 @@ Provider 未安装、无权限或无匹配结果时，只记录 Evidence Gap，�
 | 附件与链接 | 仅在验证具体假设时按安全策略访问 |
 | 代码分析 | 优先获取指定分支、Tag 或 Commit 的隔离远程快照 |
 | 浏览器与运行时 | 由 Agent 在必要且已授权时使用可用工具补充证据 |
-| 诊断输出 | 结构化报告；根因确认后附带 Jira 可粘贴回复草稿 |
+| Kubernetes | 通过独立 Kubectl Provider 读取投影后的 Ingress、Service、Endpoint、Workload、Pod、Event 和受控日志证据 |
+| 处理输出 | 问题类输出结构化诊断；需求类输出 SRE runbook、用户补充草稿、验证、回滚和完成后回复模板 |
 | 知识沉淀 | 明确授权后生成脱敏 Inbox 候选，等待人工整理 |
 
-当前版本不内置 CMDB、Jenkins、Loki 或团队 Git 知识库 Provider。这些系统可以作为后续的只读证据源扩展，但不是本地运行依赖。
+当前 Core 不内置企业 Provider。Jenkins 与 Kubectl 已作为独立可选包实现；CMDB、Loki 和团队 Git 知识库仍是后续扩展，也都不是本地运行依赖。
 
 ## 环境要求
 
@@ -81,9 +94,10 @@ Provider 未安装、无权限或无匹配结果时，只记录 Evidence Gap，�
 2. 从 https://github.com/AlvinGgg/l05-diagnosis-skill.git 安装到 ~/.codex/skills/l05-diagnosis。
 3. 验证 SKILL.md、agents/openai.yaml、scripts、references 和 assets 完整。
 4. 运行 Skill Creator 的 quick_validate.py，以及仓库中的 Node 和 Python 测试。
-5. 运行 scripts/l05_setup.py doctor，只汇报缺少的配置项，不读取或输出任何已有凭据值。
-6. 告诉我需要在本地配置哪些变量，并引导我初始化或连接 Obsidian Vault、检查 `.l05-profile.json`，不要要求我把 Token 粘贴到对话中。
-7. Profile 只填写非秘密的知识目录、仓库元数据和路由规则；完成后运行 `scripts/l05_profile.py validate`。
+5. 安装完成后立即运行 scripts/l05_setup.py doctor，不读取或输出任何凭据值。
+6. 如果状态为 needs_setup，完整展示 configuration_chain 和 setup_actions，依次协助我选择或连接 Obsidian Vault、配置 Jira 常规信息、在本机私有配置中填写只读 Token、检查文件权限并验证 `.l05-profile.json`；不要要求我把 Token 粘贴到对话中。
+7. 所有机器相关路径只写入进程环境或本机私有配置，不写回 Skill、模板、测试、报告或公共文档。
+8. 每完成一组配置后重新运行 doctor；只有状态为 ready 才结束安装引导并允许处理真实工单。
 ```
 
 ### 命令安装
@@ -110,6 +124,26 @@ git clone https://github.com/AlvinGgg/l05-diagnosis-skill.git ~/.codex/skills/l0
 ```bash
 export L05_SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/l05-diagnosis"
 ```
+
+安装完成后先运行配置门：
+
+```bash
+python3 "$L05_SKILL_DIR/scripts/l05_setup.py" doctor
+```
+
+`doctor` 始终输出六段 `configuration_chain`，并在未就绪时返回按顺序执行的
+`setup_actions`：
+
+1. 知识库：外置配置中的绝对 Vault 路径及完整目录契约。
+2. 常规配置：有效的 Jira 根地址与认证模式；Basic 模式还需本机用户标识。
+3. 敏感配置：非占位的只读 Token，以及私有配置文件的安全权限。
+4. Vault Profile：存在且通过校验；代码仓库目录可以为空。
+5. 运行时：Node.js 可用。
+6. 复检：重新运行 `doctor`，只有 `status=ready` 才进入真实工单处理。
+
+`doctor` 只报告布尔状态、错误码和安全操作，不输出 Token、密码或其他凭据值。
+Vault、代码根目录、工作流仓库、缓存和 Provider 目录等机器相关位置，只能来自
+CLI 参数、进程环境或本机私有配置，不能固化到公共 Skill。
 
 ### 1. 初始化新的 Obsidian Vault
 
@@ -149,7 +183,7 @@ chmod 600 ~/.codex/l05-diagnosis.env
 
 不要把 Token 写入仓库、Vault、命令行参数或 Agent 对话。进程环境变量优先于私有配置文件；`~/.zshrc` 的字面量 `JIRA_TOKEN` 读取仅用于旧环境兼容，推荐使用独立配置文件。
 
-Jira 拉取失败时，Skill 会立即停止诊断，并输出脱敏后的技术原因、失败分类和针对性检查项。若错误是 DNS、连接或超时且只发生在受限 Agent 环境，Agent 应先申请该次只读请求的网络权限并重试一次；HTTP 401/403 不会被误判为网络问题。Skill 不会因拉取失败而读取知识库、历史工单或代码进行猜测。
+Jira 拉取失败时，Skill 会立即停止处理，并输出脱敏后的技术原因、失败分类、请求次数和针对性检查项。Collector 会对 DNS、连接、超时、HTTP 429 和 HTTP 5xx 做最多三次有界退避重试，不重试本地配置、TLS、HTTP 401、HTTP 403 或 HTTP 404。若失败只发生在受限 Agent 环境，Agent 必须为同一只读采集命令申请网络权限；未取得非空、可解析的执行结果不能计为完成的重试。Skill 不会因拉取失败而读取知识库、历史工单或代码进行猜测。
 
 ### 3. 配置非秘密 Profile
 
@@ -160,7 +194,26 @@ python3 "$L05_SKILL_DIR/scripts/l05_profile.py" init \
   --vault /absolute/path/to/existing-vault
 ```
 
-Profile 用于映射 Vault 目录，并在代码排查时把问题类型和当前信号路由到候选仓库。它可以保留在私有 Vault 或团队配置仓库中，但只能包含非秘密信息；Token、密码、Cookie、私钥和带凭据的仓库 URL 都会被校验器拒绝。
+Profile 用于映射 Vault 目录、可选 Jira 语义字段，并在代码排查时把问题类型和当前信号路由到候选仓库。它可以保留在私有 Vault 或团队配置仓库中，但只能包含非秘密信息；Token、密码、Cookie、私钥和带凭据的仓库 URL 都会被校验器拒绝。
+
+可选 Jira 字段映射使用公共语义槽位，组织字段 ID 或名称只保留在私有 Profile 中：
+
+```json
+{
+  "jira": {
+    "field_mappings": {
+      "request_type": ["customfield_12345"],
+      "question_classification": ["Question Classification"],
+      "issue_category": ["customfield_67890"],
+      "environment": ["Environment"]
+    }
+  }
+}
+```
+
+允许的槽位只有 `request_type`、`question_classification`、`issue_category`
+和 `environment`。这些值只作为意图判断的辅助信号，不能覆盖请求人的明确表述，
+也不能证明当前生产状态。
 
 配置示例：
 
@@ -195,7 +248,7 @@ python3 "$L05_SKILL_DIR/scripts/l05_profile.py" validate \
   --vault /absolute/path/to/vault
 ```
 
-Profile 缺失或未配置仓库时，Jira 和知识库初诊仍可使用，但自动代码仓库路由受限；Profile 无效时必须先修复。
+Profile 缺失或无效时配置门不会放行；Profile 有效但未配置代码仓库时，Jira 和知识库处理仍可使用，只是自动代码仓库路由受限。
 
 ### 4. 检查环境
 
@@ -203,7 +256,8 @@ Profile 缺失或未配置仓库时，Jira 和知识库初诊仍可使用，但�
 python3 "$L05_SKILL_DIR/scripts/l05_setup.py" doctor
 ```
 
-只有 Jira 地址、Token、Vault 契约和 Node.js 均就绪后，才应开始真实工单诊断。
+只有 `doctor` 返回 `status=ready` 后，才应开始真实工单处理。未完成时应按
+`setup_actions` 引导补齐，而不是尝试 Jira、Vault、Provider 或代码检索。
 
 ## 构建知识库
 
@@ -243,16 +297,22 @@ $l05-diagnosis 排查 ABC-12345
 $l05-diagnosis 帮我诊断 https://jira.example.com/browse/ABC-12345
 ```
 
+需求实现也使用同一个 Skill：
+
+```text
+$l05-diagnosis 请根据 ABC-12345 给出需要 SRE 人工实施的处理流程和完成后回复草稿
+```
+
 Skill 会按以下顺序执行：
 
 1. 运行本地配置检查。
 2. 只读获取并验证当前 Jira 工单。
-3. 理解问题类型并生成脱敏检索词。
-4. 读取并校验 Vault Profile，用当前问题类型、错误信号和组件解析候选平台仓库。
-5. 按 Vault Profile 和契约检索 Wiki、文档和合格历史工单。
-6. 仅针对具体假设检查附件、链接、代码或浏览器证据。
-7. 输出事实、假设、证据缺口、根因等级、建议修改和验证计划，并向 Skill 使用者列出本次实际完成的排查链路。
-8. 排查类仅在根因确认时附带完整 Jira 回复草稿；咨询类在权威文档或当前代码足以支持答案时生成回复。
+3. 生成结构化意图判断；意图不明时先输出用户补充信息草稿。
+4. 读取并校验 Vault Profile，用当前问题或工作类型、信号和组件解析候选平台仓库。
+5. 问题类检索因果证据；需求类检索操作、参数、限制、验证和回滚依据。
+6. 仅针对具体假设或实施步骤检查附件、链接、代码、Provider、浏览器或运行时证据。
+7. 问题类输出事实、假设、证据缺口、根因等级和排查链路；需求类输出 SRE runbook、待确认项、完成证据和处理链路。
+8. 排查类仅在根因确认时附带完整回复；需求类在规划阶段只输出不可发送的完成后模板，取得执行与验证证据后才转为可发送草稿。
 
 ### 可选代码证据
 
@@ -294,22 +354,24 @@ python3 "$L05_SKILL_DIR/scripts/search_local_code.py" \
 - `--case-dir <path>`：保留到指定目录。
 - `--publish-to-kb`：在明确授权后生成脱敏知识候选，不会自动发布正式 Wiki。
 
-## 诊断输出
+附件默认只采集元数据。只有确需验证当前假设时才使用
+`--attachment-mode all` 有界下载；下载内容必须按
+`references/attachment-policy.md` 预览，并仅通过 Collector 的受保护
+`cleanup` 命令清理其自有临时根目录。
 
-报告固定包含：
+## 分路线输出
 
-- 采集状态与工单事实
-- 时间线
-- 知识库匹配、质量和新鲜度
-- 已检查证据
-- 实际排查链路，包括已访问的知识文档、仓库/ref/文件、Jenkins Build URL、Provider 或浏览器页面
-- 支持、反驳和缺失证据
-- 根因等级：`confirmed`、`probable`、`unresolved` 或 `blocked`
-- 建议修改与验证计划
-- 访问和证据缺口
-- 根因确认的排查回复，或有权威依据的咨询回复
+Case 始终生成 `case-summary.json`。保留临时 Case 时，还会按意图生成：
 
-Jira 回复草稿默认使用中文。咨询类会优先直接说明统一规则，并在有依据时给出最小配置示例和高相关原始文档链接；排查类会覆盖必要背景、排查证据、根因、处理方案和验证，必要时补充改进建议。未执行的修改必须标记为建议，不能写成已经修复。
+- `diagnosis.md`：问题排查或混合工单的结构化诊断。
+- `fulfillment.md`：需求实现的 SRE runbook、验证、回滚和完成后回复模板。
+- `clarification.md`：意图不明时的一次性用户补充信息草稿；此时不会检索 Vault、Provider、代码、浏览器或运行时证据。
+
+每个最终答复都必须直接包含 `本次处理链路`，不能只依赖可能被折叠的进度消息或本地报告链接。每个实际检查或尝试都记录状态、目的、安全目标、查询范围、结果、对结论的影响和可安全公开的引用；失败访问必须标记为失败，不能当作支持证据。
+
+问题排查路线包含当前工单事实、时间线、知识库匹配与新鲜度、支持与反驳证据、根因等级、建议修改、验证计划和证据缺口。需求实现路线区分 `requester_input`、`sre_precheck`、`approval_input` 与 `evidence_gap`，并提供目标与排除项、当前状态快照、实施停止条件、验证、回滚和完成证据。
+
+Jira 回复草稿默认使用中文。排查类只有当前证据确认根因后才生成可发送回复；咨询类需要权威文档或当前代码支持；需求类在 `execution_status=not_executed` 时只生成明确标注“不可直接发送”的模板，只有实际执行和验证证据齐全后才能生成可发送的完成回复。未执行的修改必须标记为建议，不能写成已经修复。
 
 ## 安全边界
 

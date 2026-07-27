@@ -18,6 +18,9 @@
     "wiki_concepts": "wiki/concepts",
     "quality_reports": "system/reports/jira-quality"
   },
+  "jira": {
+    "field_mappings": {}
+  },
   "code": {
     "repositories": [],
     "routing_rules": []

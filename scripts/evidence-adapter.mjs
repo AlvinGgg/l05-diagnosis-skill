@@ -26,16 +26,19 @@ function safeRelative(value) {
 
 export function loadVaultProfile(kbRoot) {
   const file = path.join(path.resolve(kbRoot), ".l05-profile.json");
-  if (!fs.existsSync(file)) return {status: "missing", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: ["profile_not_found"]};
+  if (!fs.existsSync(file)) return {status: "missing", paths: {...DEFAULT_KNOWLEDGE_PATHS}, field_mappings: {}, errors: ["profile_not_found"]};
   try {
     const profile = JSON.parse(readText(file));
     const configured = profile?.knowledge;
     if (typeof configured !== "object" || configured === null) throw new Error("knowledge_mapping_missing");
     const invalid = Object.entries(configured).filter(([, value]) => !safeRelative(value)).map(([key]) => `unsafe_knowledge_path:${key}`);
-    if (invalid.length) return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: invalid};
-    return {status: "valid", paths: {...DEFAULT_KNOWLEDGE_PATHS, ...configured}, errors: []};
+    const fieldMappings = profile?.jira?.field_mappings || {};
+    if (typeof fieldMappings !== "object" || fieldMappings === null || Array.isArray(fieldMappings)) invalid.push("jira_field_mappings_invalid");
+    else if (Object.values(fieldMappings).some((values) => !Array.isArray(values) || !values.length || values.some((value) => typeof value !== "string" || !value.trim()))) invalid.push("jira_field_mappings_invalid");
+    if (invalid.length) return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, field_mappings: {}, errors: invalid};
+    return {status: "valid", paths: {...DEFAULT_KNOWLEDGE_PATHS, ...configured}, field_mappings: fieldMappings, errors: []};
   } catch {
-    return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, errors: ["profile_json_is_invalid"]};
+    return {status: "invalid", paths: {...DEFAULT_KNOWLEDGE_PATHS}, field_mappings: {}, errors: ["profile_json_is_invalid"]};
   }
 }
 

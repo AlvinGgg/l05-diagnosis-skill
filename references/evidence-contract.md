@@ -1,19 +1,23 @@
-# L0.5 Diagnosis Evidence Contract
+# L0.5 Case Evidence Contract
 
-Use this contract for the final answer and for any durable notes created from an investigation.
+Use this contract for the final answer and for any durable notes created from
+an investigation or request-fulfillment plan.
 
 ## Required Evidence Groups
 
 - Jira: issue key, summary, description signal, status, labels/components when available, relevant user comments, and updated timestamp. This group is mandatory before any diagnosis.
+- Intent: `work_intent`, delivery mode, confidence, supporting and counter-signals, planning/execution status, owner, and pending confirmations. This group is mandatory after Jira validates.
 - Obsidian: exact vault file paths read, including `wiki/` pages and `raw/tickets/` files when historical tickets influenced the answer.
 - Code: Repository, requested ref, resolved Commit, resolution basis, file path, symbol/config key, and whether the execution version was confirmed. For an explicitly enabled local Repository, also record branch and dirty/sync state.
 - Browser: URL/page state only when Chrome/browser evidence was used.
+- Kubernetes: Provider capability, safe context alias, Namespace, Kind/Name, resource version or collection time, projected fields, RBAC/TLS state, truncation/redaction, and gaps. Never include a kubeconfig, raw object, Secret, endpoint address list, or unredacted log.
 - Missing: concrete fields, logs, screenshots, environments, namespaces, pipeline IDs, or owner input still required.
 - Token/cache: exact runtime usage only if Codex exposes it for the current run.
 
 ## Claim Rules
 
 - If Jira facts are unavailable, produce only a blocked result. Do not include Obsidian/code/browser claims or a preliminary diagnosis.
+- Create the intent assessment before Vault, Provider, code, browser, runtime, or web evidence. If intent is `unclear`, return the requester-information draft and stop.
 - Tie every non-obvious diagnosis claim to at least one evidence group.
 - Separate observed fact from inference.
 - Mark historical-ticket lessons as precedent unless current docs or code confirm them.
@@ -21,8 +25,11 @@ Use this contract for the final answer and for any durable notes created from an
 - Do not include low, rejected, blocked, or secret-like historical evidence in ordinary retrieval output.
 - Do not present LLM-generated reasoning as an authoritative operational fact.
 - Do not claim that Jira, code, or browser state was verified unless the relevant tool was actually run.
-- Give the Skill user an investigation trail containing every evidence source actually inspected and its purpose/result. Include safe exact identifiers such as Repository/ref/file, Jenkins job/build URL, KB path, Provider, or browser URL. Omit unused evidence types and keep this trail out of the customer-facing Jira draft.
+- Give the Skill user a mandatory `本次处理链路` containing every evidence source actually inspected or attempted. For each step record status, purpose, safe source/target, query scope, result, effect on the conclusion, and exact safe references such as Repository/ref/file, Jenkins job/build URL, KB path, Provider, or browser URL. Mark failed access as failed and retain the resulting gap; use `not_run` only when an intent or safety gate stopped downstream retrieval. Omit unused evidence types and keep this trail out of the customer-facing Jira draft.
 - Generate a ready-to-paste troubleshooting reply only for a `confirmed` root cause. A consultation reply may be generated when authoritative documentation or current code supports the guidance. Both must distinguish completed actions and observed verification from recommendations and pending verification.
+- For fulfillment, distinguish `requester_input`, `sre_precheck`, `approval_input`, and `evidence_gap`. Ask the requester only for information they reasonably own; keep internal current-state checks in the SRE runbook.
+- A fulfillment runbook must include target/exclusions, current-state snapshot, evidence-backed steps, stop conditions, validation, rollback, and completion evidence. Documentation proves supported product behavior, not current production state.
+- While `execution_status=not_executed`, label the completion reply as a template that is not ready to paste. Use completed tense only for actions and validation proven by current execution evidence.
 - When a configuration example is supported by the inspected documentation or code, include the smallest useful example with placeholders instead of secret, environment-specific, or invented values.
 - When a highly relevant KB document contains an original source URL, include that URL in the customer reply. Do not expose a local Vault path, and do not invent a source URL when metadata is absent.
 
@@ -38,9 +45,13 @@ Use this contract for the final answer and for any durable notes created from an
 - Code: <repos/files/branches or not used>
 - Missing: <remaining gaps>
 
-**排查链路**
-1. <actual source/location inspected>：<what was checked and what it established>
-2. <actual source/location inspected>：<what was checked and what it established>
+**本次处理链路**
+1. `<status>` / <safe source or target>
+   - 目的：<why this source was queried>
+   - 查询范围：<safe query, fields, path, ref, time window, or capability>
+   - 结果：<observed result>
+   - 对结论的影响：<how this changed or bounded the conclusion>
+   - 引用：<exact safe identifiers>
 
 **初步诊断**
 <likely cause and confidence>
@@ -55,8 +66,40 @@ Use this contract for the final answer and for any durable notes created from an
 <optional; include only exact runtime prompt/completion/cache values exposed by Codex>
 ```
 
-Keep the final response concise. Expand only when the issue spans multiple systems or conflicting evidence.
-In `排查链路`, omit unused source types instead of writing `not used`.
+Keep conclusions and the Jira draft concise, but never remove `本次处理链路`.
+Omit unused source types instead of writing `not used`; retain actual failed
+attempts and an intentional gate stop.
+
+## Request fulfillment output
+
+```markdown
+**意图判断**
+<work intent, confidence, evidence signals, and pending confirmations>
+
+**当前状态**
+<planning status, execution status, and whether drafts are ready to paste>
+
+**工单目标与范围**
+<current facts, desired state, target, environment, and exclusions>
+
+**用户补充信息草稿**
+<only for requester_input; consolidate minimum answerable questions>
+
+**面向 SRE 的处理流程**
+<prechecks, snapshot, implementation, stop conditions, validation, rollback>
+
+**完成判定与需回填证据**
+<actual change, approval, time, validation, adjacent scope, acceptance>
+
+**处理完成后的回复草稿**
+<template until verified_complete; ready to paste only after evidence>
+
+**本次处理链路**
+<all actual searches and attempts with status, purpose, scope, result, impact, and safe references>
+```
+
+Omit `用户补充信息草稿` when no `requester_input` exists. Do not ask the
+requester to discover an `sre_precheck`.
 
 ## Blocked Template
 
@@ -81,4 +124,4 @@ Use this shape when Jira facts cannot be fetched or are insufficient:
 <optional; include only exact runtime prompt/completion/cache values exposed by Codex>
 ```
 
-For `jira_dns_resolution_failed`, `jira_network_unreachable`, or `jira_request_timeout`, retry the same read-only Collector command once with permitted network access before returning the blocked template. Do not retry authentication or permission failures as a network problem.
+For `jira_dns_resolution_failed`, `jira_network_unreachable`, or `jira_request_timeout`, the Collector must perform one to three bounded retries. If the Agent runtime explicitly restricts network access, run the initial read-only Collector command with permitted network access; otherwise rerun the same command with permission after the first restricted failure. Make the permitted command a direct `exec_command` call rather than nesting it in a composition or orchestration wrapper. Do not count a blank, interrupted, pending, or rejected tool result as a completed retry. Return this blocked template only after a permitted command has returned a parseable result with exhausted retries, or after permission was denied. Include `request_attempts`, `retry_count`, and `retries_exhausted` in the internal failure result. Do not retry authentication or permission failures as a network problem.

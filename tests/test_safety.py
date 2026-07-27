@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -174,7 +175,79 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(report["profile"]["code_routing_configured"], False)
             self.assertEqual(report["providers"]["configured"], [])
             self.assertIn("code_repositories_not_configured", report["warnings"])
+            self.assertEqual(report["setup_actions"], [])
+            self.assertTrue(all(item["complete"] for item in report["configuration_chain"]))
             self.assertNotIn("fixture-private-value", result.stdout)
+
+    def test_doctor_returns_complete_secret_safe_setup_actions(self):
+        skill = Path(__file__).resolve().parents[1]
+        script = skill / "scripts" / "l05_setup.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "l05.env"
+            config.write_text(
+                "JIRA_BASE_URL=https://jira.example.invalid\n"
+                "JIRA_TOKEN=<your-read-only-token>\n"
+                "JIRA_AUTH_MODE=basic\n"
+                "L05_OBSIDIAN_VAULT=relative-vault\n",
+                encoding="utf-8",
+            )
+            config.chmod(0o644)
+            isolated_env = os.environ.copy()
+            for name in ("JIRA_BASE_URL", "JIRA_TOKEN", "JIRA_AUTH_MODE", "JIRA_EMAIL", "L05_OBSIDIAN_VAULT", "PAAS_KB_ROOT"):
+                isolated_env.pop(name, None)
+            result = subprocess.run(
+                [sys.executable, str(script), "doctor", "--config-file", str(config)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=isolated_env,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "needs_setup")
+            for blocker in [
+                "vault_path_must_be_absolute",
+                "profile_missing",
+                "jira_token_missing",
+                "jira_base_url_missing_or_placeholder",
+                "jira_email_missing_for_basic_auth",
+                "private_config_permissions_too_open",
+            ]:
+                self.assertIn(blocker, report["blockers"])
+            action_codes = {item["code"] for item in report["setup_actions"]}
+            for action in [
+                "replace_relative_vault_path",
+                "create_vault_profile",
+                "configure_jira_connection",
+                "set_jira_token_privately",
+                "restrict_private_config_permissions",
+            ]:
+                self.assertIn(action, action_codes)
+            self.assertEqual(
+                [item["group"] for item in report["setup_actions"]],
+                ["knowledge_vault", "regular_configuration", "sensitive_configuration", "sensitive_configuration", "vault_profile"],
+            )
+            self.assertEqual([item["order"] for item in report["configuration_chain"]], [1, 2, 3, 4, 5, 6])
+            self.assertNotIn("<your-read-only-token>", result.stdout)
+
+    def test_public_skill_contains_no_user_bound_absolute_home_paths(self):
+        skill = Path(__file__).resolve().parents[1]
+        unix_roots = ("/" + "Users" + "/", "/" + "home" + "/")
+        windows_root = re.compile(r"[A-Za-z]:\\\\Users\\\\[^\\\\\s]+\\\\")
+        violations = []
+        for file in skill.rglob("*"):
+            if not file.is_file() or any(part in {".git", "__pycache__"} for part in file.parts):
+                continue
+            try:
+                text = file.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            for root in unix_roots:
+                if re.search(re.escape(root) + r"[^/<\s]+/", text):
+                    violations.append(file.relative_to(skill).as_posix())
+            if windows_root.search(text):
+                violations.append(file.relative_to(skill).as_posix())
+        self.assertEqual(sorted(set(violations)), [])
 
     def test_profile_resolves_repository_candidates_without_credentials(self):
         skill = Path(__file__).resolve().parents[1]
@@ -233,6 +306,25 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(validation["valid"], False)
         self.assertIn("profile_must_not_contain_secret_fields", codes)
         self.assertIn("repository_url_is_invalid_or_contains_credentials", codes)
+
+    def test_profile_accepts_only_known_non_secret_jira_field_mappings(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        profile["jira"]["field_mappings"] = {
+            "request_type": ["customfield_12345", "Customer Request Type"],
+            "question_classification": ["customfield_23456"],
+            "issue_category": ["customfield_34567"],
+            "environment": ["Environment"],
+        }
+        self.assertTrue(validate_profile(profile)["valid"])
+
+        profile["jira"]["field_mappings"]["unknown_slot"] = ["customfield_99999"]
+        profile["jira"]["field_mappings"]["environment"] = []
+        validation = validate_profile(profile)
+        codes = {item["code"] for item in validation["errors"]}
+        self.assertFalse(validation["valid"])
+        self.assertIn("jira_field_mapping_slot_is_unknown", codes)
+        self.assertIn("jira_field_mapping_selectors_are_invalid", codes)
 
     def test_profile_accepts_generic_provider_routing_and_rejects_provider_secrets(self):
         skill = Path(__file__).resolve().parents[1]

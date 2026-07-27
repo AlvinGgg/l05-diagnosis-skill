@@ -1,4 +1,4 @@
 interface:
-  display_name: "L0.5 Jira Diagnosis"
-  short_description: "Set up a local Vault and diagnose Jira issues"
-  default_prompt: "Use $l05-diagnosis to check my local setup and diagnose one Jira support issue from current facts and quality-ranked evidence."
+  display_name: "L0.5 Jira Diagnosis and Fulfillment"
+  short_description: "Classify Jira intent, diagnose issues, and draft SRE runbooks"
+  default_prompt: "Use $l05-diagnosis. Run the setup doctor first; if setup is incomplete, guide me through its minimum configuration chain before handling a Jira case."

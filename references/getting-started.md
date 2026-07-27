@@ -1,10 +1,26 @@
 # L0.5 Diagnosis Setup and First Use
 
-Use this guide when the Skill is newly installed, `l05_setup.py doctor` reports `needs_setup`, or the user asks how to prepare the local knowledge Vault.
+Use this guide immediately after the Skill is installed, when
+`l05_setup.py doctor` reports `needs_setup`, or when the user asks how to
+prepare the local knowledge Vault. Run `doctor` first, present its complete
+`configuration_chain`, and follow only its ordered `setup_actions`. Do not
+start Jira collection until `doctor` returns `ready`.
 
 Optional Evidence Providers are installed only after the Jira and Vault setup below is ready. They are not required for basic diagnosis.
 
 ## Required order
+
+### 0. Run the post-install configuration gate
+
+```bash
+python3 "$SKILL_DIR/scripts/l05_setup.py" doctor
+```
+
+The result checks the externally configured Vault path, Jira connection
+settings, credential presence, private-file permissions, Vault Profile, and
+required runtime. It never prints credential values. If the result is
+`needs_setup`, retain the complete configuration chain in the response and
+perform only the listed safe setup actions.
 
 ### 1. Install Obsidian and create a Vault
 
@@ -74,7 +90,11 @@ An empty Repository catalog is allowed and means automatic code routing is unava
 python3 "$SKILL_DIR/scripts/l05_setup.py" doctor
 ```
 
-Do not start diagnosis until `jira_token_configured`, `jira_base_url_configured`, the Vault Contract, Profile validation, and Node.js are ready. `code_repositories_not_configured` is a warning rather than a blocker for Jira and Vault diagnosis.
+Do not start case handling until `doctor` returns `ready`. This requires a
+non-placeholder Token, valid Jira URL and authentication mode, Basic email when
+applicable, secure private-file permissions, an absolute configured Vault path,
+the complete Vault Contract, a valid Profile, and Node.js.
+`code_repositories_not_configured` remains a warning rather than a blocker.
 
 ### 5. Install the official Obsidian Web Clipper
 
@@ -136,14 +156,18 @@ Configure remote Repository URLs and routing rules in `.l05-profile.json`, then 
 
 - `jira_token_missing`: update the private configuration file; do not send the Token in chat.
 - `jira_base_url_missing_or_placeholder`: replace `jira.example.invalid` with the real Jira base URL.
+- `jira_auth_mode_missing_or_invalid`: set `JIRA_AUTH_MODE` to `bearer` or `basic`.
+- `jira_email_missing_for_basic_auth`: set `JIRA_EMAIL` locally when using Basic authentication.
+- `private_config_permissions_too_open`: restrict the private file to `0600`.
 - `jira_authentication_failed`: confirm Token validity and `JIRA_AUTH_MODE`; Basic authentication also requires `JIRA_EMAIL`.
 - `jira_permission_denied`: confirm Browse Projects and Issue Security access for the Token's account.
 - `jira_issue_not_found`: check the issue key, Jira instance, and whether Jira masks inaccessible issues as 404.
-- `jira_dns_resolution_failed` / `jira_network_unreachable`: check the URL, enterprise network/VPN and DNS; if only the Agent sandbox fails, grant the single read-only collection command network access and retry once.
+- `jira_dns_resolution_failed` / `jira_network_unreachable`: check the URL, enterprise network/VPN and DNS; if only the Agent sandbox fails, grant the same read-only collection command network access and let the Collector perform its bounded retries.
 - `jira_tls_failed`: install or configure the approved enterprise CA; do not globally disable TLS verification.
 - `vault_not_configured`: set `L05_OBSIDIAN_VAULT` or pass `--vault`.
+- `vault_path_must_be_absolute`: replace a relative Vault value with its absolute path in the private configuration.
 - `vault_contract_incomplete`: initialize a new empty Vault, or inspect the existing Vault's `AGENTS.md` compatibility without overwriting it.
-- `profile_missing_code_routing_unavailable`: create `.l05-profile.json`; base diagnosis remains available until code routing is needed.
+- `profile_missing`: create and validate `.l05-profile.json` before handling a case.
 - `profile_invalid`: run `l05_profile.py validate` and fix only the reported non-secret field paths.
 - `code_repositories_not_configured`: optional code routing is unavailable; add Repository metadata and rules when needed.
 - Web Clipper captures incomplete content: select the required page sections or use a site-specific template before clipping again.
@@ -151,10 +175,17 @@ Configure remote Repository URLs and routing rules in `.l05-profile.json`, then 
 
 For each independently distributed Provider:
 
-1. Read the Provider package README and confirm its read-only boundary.
+1. Read the Provider package `SKILL.md` and safety reference, then confirm its read-only boundary.
 2. Run its local Manifest installer.
 3. Add the required credential names to `~/.codex/l05-diagnosis.env` without sharing their values with the Agent.
 4. Add the Provider's non-secret Profile object to `.l05-profile.json`.
 5. Run `l05_profile.py validate`, then use a sanitized fixture or read-only smoke case.
 
 Do not copy an organization's endpoints, field aliases, resource catalog, or routing rules into the public Core Skill.
+
+For `l05-kubectl-provider`, never configure or pass a kubeconfig through the
+Vault Profile. Its installer must pin the approved kubeconfig path in the
+private locked policy, and its runtime must use only that path; context and
+Namespace admission also live in the private policy. A blocked policy or RBAC
+check creates an Evidence Gap and must never fall back to default kubectl
+configuration.

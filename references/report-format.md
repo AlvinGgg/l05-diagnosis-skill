@@ -1,22 +1,66 @@
-# Diagnosis report format
+# Route-specific report format
 
-Use these sections in order:
+Create `Intent assessment` first as defined in `intent-routing.md`.
+
+## Skill-user final response contract
+
+The final response to the person using this Skill must retain the complete
+auditable handling route even when progress commentary is collapsed. This
+contract applies to problem investigation, request fulfillment, mixed, and
+unclear cases.
+
+Include these user-visible parts in this order:
+
+1. outcome and current confidence or execution status;
+2. `本次处理链路`;
+3. material evidence gaps, pending input, and next action;
+4. the SRE runbook or requester-facing Jira draft required by the selected
+   route.
+
+`本次处理链路` is mandatory and must be present in the final response itself.
+A link to `diagnosis.md`, `fulfillment.md`, `clarification.md`, or
+`case-summary.json` is useful supplementary evidence but is not a substitute.
+Do not rely on commentary because it may be collapsed after the final answer.
+
+Build the section by reconciling the fixed report with every supplemental
+attachment, link, Repository, browser, web, Provider, runtime, or cluster access
+performed later in the turn. For every attempted step include:
+
+- status: `completed`, `completed_no_match`, `partial`, `failed`, or `not_run`;
+- purpose;
+- safe source or target;
+- query, search, or inspection scope;
+- observed result;
+- effect on the conclusion or plan;
+- exact safe references.
+
+Record a failed access as `failed` with its consequence; never describe it as
+completed evidence. Use `not_run` only for a route stopped by a gate, not to
+enumerate every tool that could hypothetically have been used. This trace
+describes observable actions and evidence provenance; it must not expose hidden
+reasoning, secrets, raw sensitive logs, or unsafe internal values.
+
+Keep `本次处理链路` outside the requester-facing Jira draft. The draft may remain
+compact and include only the decisive evidence the requester needs.
+
+For problem investigation use these sections in order:
 
 1. Collection status
 2. Ticket facts
-3. Timeline
-4. Local KB matches and freshness
-5. Investigation trail
-6. Evidence inspected
-7. Hypotheses with supporting and contradicting evidence
-8. Root cause assessment for troubleshooting: `confirmed`, `probable`,
+3. Intent assessment
+4. Timeline
+5. Local KB matches and freshness
+6. Investigation trail
+7. Evidence inspected
+8. Hypotheses with supporting and contradicting evidence
+9. Root cause assessment for troubleshooting: `confirmed`, `probable`,
    `unresolved`, or `blocked`; guidance assessment for consultation:
    `supported`, `conditional`, or `unresolved`
-9. Recommended change
-10. Verification plan
-11. Access and evidence gaps
-12. Optional KB publish result
-13. Jira reply draft, when the reply gate below is satisfied
+10. Recommended change
+11. Verification plan
+12. Access and evidence gaps
+13. Optional KB publish result
+14. Jira reply draft, when the reply gate below is satisfied
 
 Every non-obvious claim cites a Jira field/comment, bundle path, KB path, code
 path/branch, attachment, link, browser page, or runtime command. Never promote
@@ -39,12 +83,14 @@ the safe exact location, what was checked, and what it established:
 5. <Provider, browser URL, runtime query, cluster target, or attachment>: <result>
 ```
 
-Omit any line whose source was not actually inspected. Do not list setup checks,
-planned follow-up, unsuccessful access, or generic reasoning as completed
-investigation. Keep raw logs and secrets out; preserve the exact safe URL for a
-Jenkins build or browser page when it is useful to reproduce the investigation.
-The customer-facing Jira reply may summarize decisive evidence, but must not
-copy this internal trail or expose private local paths.
+Omit any line whose source was neither inspected nor attempted. Do not list
+setup checks, planned follow-up, unsuccessful access, or generic reasoning as
+completed investigation. Record an actual unsuccessful access as `failed`,
+state what evidence remains unavailable, and keep it out of supporting evidence.
+Keep raw logs and secrets out; preserve the exact safe URL for a Jenkins build
+or browser page when it is useful to reproduce the investigation. The
+customer-facing Jira reply may summarize decisive evidence, but must not copy
+this internal trail or expose private local paths.
 
 ## Reply gate
 
@@ -56,6 +102,16 @@ Classify the ticket before drafting:
 - **Consultation**: generate a reply when authoritative documentation or
   current code supports the general answer. Ticket-specific values may remain
   open, but they must be labelled as inputs needed for an exact change.
+- **Request fulfillment / requester input**: generate one ready-to-paste
+  requester-information draft when missing requester-owned facts change the
+  target, procedure, risk, rollback, or acceptance result. Do not ask the
+  requester for internal SRE current state.
+- **Request fulfillment / planning**: generate a human SRE runbook and a
+  post-completion template labelled `not ready to paste`. Do not use completed
+  tense while `execution_status=not_executed`.
+- **Request fulfillment / completion**: generate a ready-to-paste completion
+  reply only after actual changes and validation are recorded and
+  `execution_status=verified_complete`.
 - **Blocked or unsupported**: do not fabricate a customer answer. State the
   evidence gap and the next collection step instead.
 
@@ -116,6 +172,98 @@ Use Chinese unless the requester asks for another language.
 
 <only when needed: exact ticket-specific information still required>
 ```
+
+## Request fulfillment report
+
+Use these sections in order:
+
+1. Intent assessment
+2. Current status
+3. Request target and scope
+4. Current evidence and pending confirmations
+5. Requester information draft, only for `requester_input`
+6. SRE handling runbook
+7. User-side coordination, only when required
+8. Risks, approval, and rollback
+9. Completion criteria and evidence
+10. Post-completion Jira reply draft
+11. Handling trail and references
+12. Access and evidence gaps
+13. Optional KB publish result
+
+The runbook must identify target and exclusions, prechecks, the recoverable
+current-state snapshot, evidence-backed steps, stop conditions, positive and
+negative validation, adjacent-scope checks, rollback, and the evidence SRE must
+record. A procedure from documentation or precedent remains conditional until
+the current product/version and control point are confirmed.
+
+### Requester information draft
+
+Generate this only when `pending_confirmations` contains `requester_input`.
+Combine all material questions in one message, tell the requester what decision
+each answer affects, and rerun intent and plan sufficiency after the answer.
+
+```markdown
+## Requester information draft (ready to paste)
+
+您好，为确保本次 <需求目标> 按正确范围实施，请补充以下信息：
+
+1. <requester-owned missing input and fill-in format>
+   - 用途：该信息将决定 <target, parameter, risk, or acceptance result>。
+
+收到以上信息后，我们会据此完善 SRE 处理流程、验证与回滚方案。当前尚未执行变更。
+```
+
+### Planning-stage completion template
+
+```markdown
+## Post-completion Jira reply draft (template, not ready to paste)
+
+您好，您申请的 <需求目标> 已由 SRE 完成处理。
+
+【已完成】
+- <actual target and change; fill only from execution evidence>
+
+【验证结果】
+- <actual validation and result>
+
+【用户侧后续】
+- <retain only when requester action or acceptance is required>
+
+【注意事项】
+- <retain only material limitations or follow-up>
+```
+
+Keep placeholders visible during planning. This template is not a promise that
+the work occurred.
+
+### Verified completion reply
+
+Use only when the actual target/configuration difference, execution time,
+change or approval reference, validation, adjacent-scope health, and requester
+action are recorded.
+
+```markdown
+## Jira reply draft (ready to paste)
+
+您好，您申请的 <需求目标> 已完成。
+
+【已完成】
+- <actual target and evidence-backed change>
+
+【验证结果】
+- <actual validation result>
+
+【用户侧后续】
+- <only remaining requester action or acceptance>
+
+【相关参考文档】
+- [<public or requester-accessible source title>](<original source URL>)
+```
+
+Omit `用户侧后续` and `相关参考文档` when they add no value. Do not expose the
+internal Handling trail, local paths, private Repository URLs, or raw tool
+output.
 
 ## Troubleshooting reply
 
