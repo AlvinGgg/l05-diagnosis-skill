@@ -37,6 +37,12 @@ KNOWLEDGE_REQUIRED = (
 )
 SELECTOR_KEYS = ("problem_types", "keywords", "components")
 PROVIDER_CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
+JIRA_FIELD_MAPPING_SLOTS = {
+    "request_type",
+    "question_classification",
+    "issue_category",
+    "environment",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,6 +132,28 @@ def validate_profile(profile: Any) -> dict[str, Any]:
         for key, value in knowledge.items():
             if not safe_relative_path(value):
                 errors.append(error("knowledge_path_must_be_safe_relative_path", f"$.knowledge.{key}"))
+
+    jira = profile.get("jira", {})
+    if not isinstance(jira, dict):
+        errors.append(error("jira_configuration_must_be_object", "$.jira"))
+    else:
+        field_mappings = jira.get("field_mappings", {})
+        if not isinstance(field_mappings, dict):
+            errors.append(error("jira_field_mappings_must_be_object", "$.jira.field_mappings"))
+        else:
+            for slot, selectors in field_mappings.items():
+                base = f"$.jira.field_mappings.{slot}"
+                if slot not in JIRA_FIELD_MAPPING_SLOTS:
+                    errors.append(error("jira_field_mapping_slot_is_unknown", base))
+                invalid_selectors = (
+                    not isinstance(selectors, list)
+                    or not selectors
+                    or any(not isinstance(selector, str) or not selector.strip() for selector in selectors)
+                )
+                if not invalid_selectors and len(selectors) != len(set(selectors)):
+                    invalid_selectors = True
+                if invalid_selectors:
+                    errors.append(error("jira_field_mapping_selectors_are_invalid", base))
 
     code = profile.get("code")
     if not isinstance(code, dict):
@@ -258,7 +286,7 @@ def initialize(vault: Path) -> tuple[int, dict[str, Any]]:
         "status": "created",
         "profile": str(target),
         "changed": True,
-        "next": "edit only non-secret knowledge paths, repository metadata, and routing rules; then run validate",
+        "next": "edit only non-secret knowledge paths, optional Jira semantic field mappings, repository metadata, and routing rules; then run validate",
     }
 
 

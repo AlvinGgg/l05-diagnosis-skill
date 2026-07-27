@@ -33,6 +33,22 @@
         "quality_reports"
       ]
     },
+    "jira": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field_mappings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "request_type": {"$ref": "#/$defs/stringArray"},
+            "question_classification": {"$ref": "#/$defs/stringArray"},
+            "issue_category": {"$ref": "#/$defs/stringArray"},
+            "environment": {"$ref": "#/$defs/stringArray"}
+          }
+        }
+      }
+    },
     "code": {
       "type": "object",
       "additionalProperties": false,

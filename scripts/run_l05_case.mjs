@@ -11,13 +11,14 @@ import {loadMissingL05ConfigEnv} from "./vendor/jira-collector/env-loader.mjs";
 import {normalizedContentHash, validateBundle} from "./vendor/jira-collector/validate-jira-bundle.mjs";
 import {evaluateBundle} from "./vendor/ticket-quality/evaluate-jira-ticket-quality.mjs";
 import {collectOptionalEvidence} from "./provider-loader.mjs";
+import {assessIntent} from "./intent-router.mjs";
 
 const SKILL_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const COLLECTOR_CLI = path.join(SKILL_ROOT, "scripts/vendor/jira-collector/jira-collect.mjs");
 const execFileAsync = promisify(execFile);
 const INJECTION_RE = /ignore (?:all |the )?(?:previous|prior) instructions|read (?:the )?(?:environment|env) variables|upload (?:the )?(?:repository|repo)|execute (?:this |the )?command|system prompt/i;
 
-export {compareFreshness, findKbMatches, retrievalSeeds};
+export {assessIntent, compareFreshness, findKbMatches, retrievalSeeds};
 export function parseIssueIdentity(value, baseUrl = "") {
   const match = /\b([A-Z][A-Z0-9_]*-[0-9]+)\b/i.exec(value || "");
   if (!match) throw new Error(`cannot parse Jira issue key: ${value}`);
@@ -27,6 +28,13 @@ export function parseIssueIdentity(value, baseUrl = "") {
   return {issue_key: match[1].toUpperCase(), base_url: instance.replace(/\/+$/, "")};
 }
 export function detectPromptInjection(text) { return INJECTION_RE.test(text || ""); }
+
+function withoutInstructionInjection(issue) {
+  const value = structuredClone(issue);
+  if (detectPromptInjection(value.ticket?.description_markdown)) value.ticket.description_markdown = "";
+  value.comments = (value.comments || []).filter((comment) => !detectPromptInjection(comment.body_markdown));
+  return value;
+}
 
 function sanitizeFailureDetail(value) {
   return String(value || "")
@@ -42,6 +50,7 @@ function sanitizeFailureDetail(value) {
 
 export function classifyJiraCollectionFailure(value) {
   const detail = sanitizeFailureDetail(value) || "Jira collector returned no usable issue facts.";
+  const requestAttempts = Number(/after (\d+) attempts?/i.exec(detail)?.[1] || 1);
   const definitions = [
     {
       code: "jira_token_missing",
@@ -188,6 +197,9 @@ export function classifyJiraCollectionFailure(value) {
     technical_detail: detail,
     checks: selected.checks,
     retry_with_network_permission: selected.retry_with_network_permission === true,
+    request_attempts: requestAttempts,
+    retry_count: Math.max(0, requestAttempts - 1),
+    retries_exhausted: selected.retry_with_network_permission === true && requestAttempts > 1,
   };
 }
 
@@ -251,24 +263,161 @@ function hypotheses(issue, matches, providerEvidence = null) {
   }];
 }
 
-function reportFor(issue, matches, injection, vaultContract, providerEvidence = null, publishResult = null) {
+function traceRecord({status, purpose, source, scope, result, impact, references = []}) {
+  return {status, purpose, source, scope, result, impact, references};
+}
+
+function buildInspectionTrace(issue, matches, providerEvidence = null) {
+  const safeSeeds = retrievalSeeds(issue).slice(0, 8);
+  const matchReferences = matches.map((item) => item.evidence_path);
+  const records = [
+    traceRecord({
+      status: "completed",
+      purpose: "Establish the current ticket facts and select the handling route.",
+      source: `Jira ${issue.source.issue_key}`,
+      scope: `Validated current issue fields, ${issue.comments?.length || 0} comment(s), and ${issue.attachments?.length || 0} attachment metadata record(s).`,
+      result: `Current Jira bundle validated at schema ${issue.schema_version || "unknown"}.`,
+      impact: "Current Jira facts remain authoritative for intent, scope, and current state.",
+      references: [`jira:${issue.source.issue_key}`],
+    }),
+    traceRecord({
+      status: matches.length ? "completed" : "completed_no_match",
+      purpose: "Find reusable precedent, procedures, and known limitations without replacing current evidence.",
+      source: "Configured local knowledge Vault",
+      scope: `Source-first search using sanitized seeds: ${safeSeeds.join(", ") || "none"}.`,
+      result: matches.length
+        ? `Matched ${matches.length} quality- and freshness-labelled record(s): ${matchReferences.join(", ")}.`
+        : "No matching local precedent was found.",
+      impact: matches.length
+        ? "Matches are retained as precedent only; their quality and freshness limit how much they can support the current conclusion."
+        : "No historical support was added to the current conclusion.",
+      references: matchReferences,
+    }),
+  ];
+
+  if (providerEvidence) {
+    const providerRecords = (providerEvidence.responses || []).flatMap((response) =>
+      (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record})),
+    );
+    const providerGaps = providerEvidence.gaps || [];
+    const status = providerRecords.length
+      ? (providerGaps.length ? "partial" : "completed")
+      : (providerGaps.length ? "failed" : "completed_no_match");
+    const providerIds = [...new Set((providerEvidence.responses || []).map((response) => response.provider_id))];
+    records.push(traceRecord({
+      status,
+      purpose: "Collect current read-only runtime or control-plane evidence when the Profile route matches.",
+      source: providerIds.length ? `Optional Provider(s): ${providerIds.join(", ")}` : "Optional Provider routing",
+      scope: `Profile routing for normalized problem type ${providerEvidence.problem_type || "unknown"}.`,
+      result: providerRecords.length
+        ? providerRecords.map(({provider_id, record}) => `${provider_id}/${record.capability || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}`).join("; ")
+        : (providerGaps.length ? `Provider gaps: ${providerGaps.join(", ")}.` : "No Provider evidence record matched this case."),
+      impact: providerRecords.length
+        ? "Provider observations contribute current evidence but do not independently prove root cause or implementation completion."
+        : "No Provider observation changed the conclusion; any current runtime evidence remains an explicit gap.",
+      references: providerRecords.map(({provider_id, record}) => `provider:${provider_id}/${record.capability || "unknown"}`),
+    }));
+  }
+  return records;
+}
+
+function buildClarificationTrace(issue) {
+  return [
+    traceRecord({
+      status: "completed",
+      purpose: "Establish the current ticket facts and determine whether a safe handling route can be selected.",
+      source: `Jira ${issue.source.issue_key}`,
+      scope: `Validated current issue fields and ${issue.comments?.length || 0} comment(s).`,
+      result: "The requested outcome is still unclear.",
+      impact: "The Skill must ask one consolidated requester question before further retrieval.",
+      references: [`jira:${issue.source.issue_key}`],
+    }),
+    traceRecord({
+      status: "not_run",
+      purpose: "Prevent irrelevant or misleading evidence collection before intent is clear.",
+      source: "Vault, Providers, repositories, browser, web, and runtime sources",
+      scope: "Downstream evidence collection gate.",
+      result: "Not queried because intent routing stopped the case.",
+      impact: "No downstream source influenced the clarification request.",
+      references: [],
+    }),
+  ];
+}
+
+function renderInspectionTrace(records) {
+  return records.map((record, index) => {
+    const references = record.references.length ? record.references.join(", ") : "none";
+    return `${index + 1}. **${record.source}** — status: \`${record.status}\`\n`
+      + `   - Purpose: ${record.purpose}\n`
+      + `   - Query/scope: ${record.scope}\n`
+      + `   - Result: ${record.result}\n`
+      + `   - Impact on conclusion: ${record.impact}\n`
+      + `   - Safe references: ${references}`;
+  }).join("\n");
+}
+
+function reportEvidence(issue, matches, providerEvidence = null) {
   const timeline = [`- ${issue.source.issue_updated_at}: Jira issue updated`, ...(issue.comments || []).map((comment) => `- ${comment.created}: comment ${comment.id}`)].join("\n") || "- No comments collected.";
   const matchLines = matches.map((item) => `- ${item.source_type} / ${item.quality_level} / ${item.freshness} / ${item.match_reason.join(", ")}: ${item.evidence_path}`).join("\n") || "- No matching local precedent.";
   const providerLines = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `- ${provider_id} / ${record.capability || "unknown"} / ${record.confidence || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}`).join("\n") || "- No optional Provider evidence collected.";
   const providerDetails = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).filter((record) => record.data !== undefined).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `### ${provider_id} / ${record.capability || "unknown"}\n\n${JSON.stringify(record.data, null, 2).split("\n").map((line) => `    ${line}`).join("\n")}`).join("\n\n") || "- No optional Provider detail available.";
-  const investigationTrail = [
-    `Jira ${issue.source.issue_key}: collected current issue fields and ${issue.comments?.length || 0} user comments.`,
-    ...matches.map((item) => `KB ${item.evidence_path}: matched by ${item.match_reason.join(", ")}; quality=${item.quality_level}, freshness=${item.freshness}.`),
-    ...(providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => `Provider ${response.provider_id} / ${record.capability || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}.`)),
-  ].map((item, index) => `${index + 1}. ${item}`).join("\n");
+  const traceRecords = buildInspectionTrace(issue, matches, providerEvidence);
+  const investigationTrail = renderInspectionTrace(traceRecords);
   const inspectedEvidence = [
     "- Current normalized Jira bundle",
     ...(matches.length ? ["- Local evidence paths listed above"] : []),
     ...((providerEvidence?.responses || []).some((response) => response.evidence_records?.length) ? ["- Optional Provider records listed above"] : []),
   ].join("\n");
+  return {timeline, matchLines, providerLines, providerDetails, traceRecords, investigationTrail, inspectedEvidence};
+}
+
+function renderIntentAssessment(intent) {
+  const supporting = intent.supporting_signals.map((item) => `- ${item.source} / ${item.signal}: ${item.summary}`).join("\n") || "- No decisive content signal.";
+  const counter = intent.counter_signals.map((item) => `- ${item.source} / ${item.signal}: ${item.summary}`).join("\n") || "- None.";
+  return `- Work intent: ${intent.work_intent}\n- Delivery mode: ${intent.delivery_mode}\n- Confidence: ${intent.confidence}\n- Execution owner: ${intent.execution_owner}\n- Planning status: ${intent.planning_status}\n- Execution status: ${intent.execution_status}\n\n### Supporting signals\n\n${supporting}\n\n### Counter-signals\n\n${counter}`;
+}
+
+function renderPendingConfirmations(intent) {
+  return intent.pending_confirmations.map((item) => `- ${item.kind}: ${item.item}`).join("\n") || "- No material pending confirmation recorded.";
+}
+
+function requesterInformationDraft(intent) {
+  const requests = intent.pending_confirmations.filter((item) => item.kind === "requester_input");
+  if (!requests.length) return "";
+  const questions = requests.map((item, index) => `${index + 1}. ${item.question}\n   - 用途：${item.item}`).join("\n");
+  return `\n\n## Requester information draft (ready to paste)\n\n您好，为确保本次需求按正确范围实施，请补充以下信息：\n\n${questions}\n\n收到以上信息后，我们会重新核对需求意图与方案充分性，并据此完善 SRE 处理流程、验证与回滚方案。当前尚未执行任何变更。`;
+}
+
+function requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
+  const evidence = reportEvidence(issue, matches, providerEvidence);
+  const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
+  const requesterDraft = requesterInformationDraft(intent);
+  const userSide = requesterDraft
+    ? "\n\n## User-side coordination\n\n- Reply with the requester-owned inputs listed above.\n- Internal current-state checks remain with SRE."
+    : "";
+  return `# L0.5 request fulfillment: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Analysis mode: read-only evidence collection and human handoff.\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}; no production or Jira write was performed.\n- Completion reply: template only, not ready to paste.\n\n## Request target and scope\n\n- Summary: ${issue.ticket.summary}\n- Environment: ${issue.ticket.environment || "not confirmed"}\n- Components: ${issue.ticket.components.join(", ") || "not confirmed"}\n- The exact desired state and exclusions must come from current Jira facts or confirmed requester input; historical precedent cannot supply production values.\n\n## Current evidence and pending confirmations\n\n${renderPendingConfirmations(intent)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}${requesterDraft}\n\n## SRE handling runbook\n\n1. Confirm the exact target resource, environment, product/version, control point, requested values, exclusions, approval, change window, and rollback owner.\n2. Capture the current effective configuration and a recoverable pre-change snapshot.\n3. Resolve every requester input and evidence gap that changes the implementation path; use only steps supported by current configuration, authoritative documentation, code, or a reviewed precedent.\n4. Apply only the approved target-scoped change through the responsible SRE control plane. This report does not authorize or perform that action.\n5. Verify the requested behavior, unaffected adjacent scope, monitoring signals, and rollback readiness.\n6. Record the actual configuration difference, change record, execution time, validation result, and requester acceptance when required.${userSide}\n\n## Risks, approval, and rollback\n\n- Any production-affecting action requires explicit target resolution, human review, and the applicable approval.\n- Stop when the current product/control point, affected scope, or rollback path cannot be confirmed.\n- Roll back from the captured snapshot when validation fails or an excluded scope changes unexpectedly, then re-run the pre-change checks.\n\n## Completion criteria and evidence\n\n- Target state is observable in the responsible control plane.\n- Positive and negative validation results are recorded.\n- Adjacent scope remains healthy.\n- Change/approval reference, actual values changed, execution time, and rollback status are retained.\n- The requester has completed or accepted any explicitly assigned user-side step.\n\n## Post-completion Jira reply draft (template, not ready to paste)\n\n您好，您申请的 <需求目标> 已由 SRE 完成处理。\n\n【已完成】\n- <actual target and change, supported by execution evidence>\n\n【验证结果】\n- <actual validation and result>\n\n【用户侧后续】\n- <retain only when requester action or acceptance is still required>\n\n【注意事项】\n- <retain only material limitations or follow-up>\n\nDo not convert this template to ready-to-paste until execution and validation evidence is available.\n\n## Handling trail and references\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; the SRE prechecks above are still required before implementation."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n`;
+}
+
+function unclearReportFor(issue, injection, intent) {
+  const injectionGap = injection ? "\n- prompt-injection-text-detected-and-ignored" : "";
+  const investigationTrail = renderInspectionTrace(buildClarificationTrace(issue));
+  return `# L0.5 clarification required: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}.\n- Jira facts were collected, but no Vault, Provider, code, browser, or runtime evidence was inspected because the requested outcome is unclear.\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n\n## Investigation trail\n\n${investigationTrail}\n\n${requesterInformationDraft(intent).trim()}\n\n## Evidence gaps\n\n${renderPendingConfirmations(intent)}${injectionGap}\n`;
+}
+
+function troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
+  const evidence = reportEvidence(issue, matches, providerEvidence);
   const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
   const structuredHypotheses = hypotheses(issue, matches, providerEvidence);
-  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Timeline\n\n${timeline}\n\n## Local KB matches and freshness\n\n${matchLines}\n\n## Optional Provider evidence\n\n${providerLines}\n\n## Optional Provider evidence details\n\n${providerDetails}\n\n## Investigation trail\n\n${investigationTrail}\n\n## Evidence inspected\n\n${inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.\n\n## Recommended change\n\nCollect the narrow current log, configuration, code, or runtime evidence needed to test the leading hypothesis. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nReproduce safely, inspect the relevant current configuration/code/runtime evidence, apply a human-reviewed change, and verify regression behavior in the affected environment.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
+  const mixedSection = intent.work_intent === "mixed"
+    ? `\n\n## Request fulfillment subtask\n\n**blocked** — keep the requested implementation separate from the investigation. Do not turn an unconfirmed causal hypothesis into an SRE change step.\n\n${renderPendingConfirmations(intent)}${requesterInformationDraft(intent)}`
+    : "";
+  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Timeline\n\n${evidence.timeline}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}\n\n## Investigation trail\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.${mixedSection}\n\n## Recommended change\n\nCollect the narrow current log, configuration, code, or runtime evidence needed to test the leading hypothesis. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nReproduce safely, inspect the relevant current configuration/code/runtime evidence, apply a human-reviewed change, and verify regression behavior in the affected environment.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
+}
+
+function reportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
+  if (intent.work_intent === "request_fulfillment") return requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, publishResult);
+  if (intent.work_intent === "unclear") return unclearReportFor(issue, injection, intent);
+  return troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, publishResult);
 }
 
 export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode = "metadata-only", caseDir, keepTemp = false, publishToKb = false, providerDir}) {
@@ -299,27 +448,89 @@ export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode =
     const normalized = JSON.parse(fs.readFileSync(normalizedPath, "utf8"));
     fs.copyFileSync(path.join(collection.bundle, "ticket.md"), path.join(root, "issue.md"));
     fs.copyFileSync(normalizedPath, path.join(root, "issue.normalized.json"));
+    stage = "intent_routing";
+    const injection = detectPromptInjection(`${normalized.ticket.description_markdown}\n${normalized.comments.map((item) => item.body_markdown).join("\n")}`);
+    const routingProfile = loadVaultProfile(kbRoot);
+    const intentAssessment = assessIntent(withoutInstructionInjection(normalized), routingProfile.field_mappings);
+    if (intentAssessment.work_intent === "unclear") {
+      const report = reportFor(normalized, [], injection, null, intentAssessment);
+      const summary = {
+        issue_key: normalized.source.issue_key,
+        collection_status: normalized.collection,
+        intent_assessment: intentAssessment,
+        prompt_injection_detected: injection,
+        kb_matches: [],
+        optional_provider_evidence: null,
+        inspection_trace: buildClarificationTrace(normalized),
+        hypotheses: [],
+        publish_result: null,
+      };
+      const reportFile = path.join(root, "clarification.md");
+      fs.writeFileSync(reportFile, report);
+      fs.writeFileSync(path.join(root, "case-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+      return {
+        status: "needs_input",
+        issue_key: normalized.source.issue_key,
+        report,
+        report_file: keepTemp || !temporary ? reportFile : null,
+        case_dir: keepTemp || !temporary ? root : null,
+        bundle: keepTemp || !temporary ? collection.bundle : null,
+        intent_assessment: intentAssessment,
+        kb_matches: [],
+        provider_evidence: null,
+        publish_result: null,
+      };
+    }
     stage = "vault_retrieval";
     const vaultContract = readVaultContract(kbRoot);
     const matches = findKbMatches(kbRoot, normalized, normalized.source.issue_updated_at);
     const seedDetails = extractRetrievalSeedDetails(normalized);
     const providerEvidence = await collectOptionalEvidence({kbRoot, issue: normalized, retrievalSeedDetails: seedDetails, providerDir});
-    const injection = detectPromptInjection(`${normalized.ticket.description_markdown}\n${normalized.comments.map((item) => item.body_markdown).join("\n")}`);
-    let report = reportFor(normalized, matches, injection, vaultContract, providerEvidence);
+    let report = reportFor(normalized, matches, injection, vaultContract, intentAssessment, providerEvidence);
     let publishResult = null;
     if (publishToKb) {
       const candidate = structuredClone(normalized);
       candidate.attachments = candidate.attachments.map((item) => ({...item, sha256: "", download_status: "not_requested", relative_path: ""}));
-      candidate.diagnosis = {status: "unresolved", report_markdown: report};
+      if (intentAssessment.work_intent === "request_fulfillment") {
+        candidate.fulfillment = {status: "planned", intent_assessment: intentAssessment, report_markdown: report};
+      } else {
+        candidate.diagnosis = {status: "unresolved", intent_assessment: intentAssessment, report_markdown: report};
+      }
       candidate.content_hash = normalizedContentHash(candidate);
       publishResult = new BundleWriter({outputRoot: path.join(kbRoot, "inbox/jira"), collectorName: "l05-diagnosis", collectorVersion: "2.0.0"}).write({rawIssue: {source: candidate.source, retained_in_temporary_case_only: true}, normalized: candidate, attachmentFiles: new Map()});
       publishResult.quality = evaluateBundle(publishResult.bundle, {vault: kbRoot, outputDir: path.join(kbRoot, "system/reports/jira-quality")});
-      report = reportFor(candidate, matches, injection, vaultContract, providerEvidence, publishResult);
+      report = reportFor(candidate, matches, injection, vaultContract, intentAssessment, providerEvidence, publishResult);
     }
-    const summary = {issue_key: normalized.source.issue_key, collection_status: normalized.collection, vault_contract: vaultContract, kb_matches: matches, retrieval_seeds: retrievalSeeds(normalized), retrieval_seed_details: seedDetails, optional_provider_evidence: providerEvidence, prompt_injection_detected: injection, hypotheses: hypotheses(normalized, matches, providerEvidence), publish_result: publishResult};
-    fs.writeFileSync(path.join(root, "diagnosis.md"), report);
+    const summary = {
+      issue_key: normalized.source.issue_key,
+      collection_status: normalized.collection,
+      intent_assessment: intentAssessment,
+      vault_contract: vaultContract,
+      kb_matches: matches,
+      retrieval_seeds: retrievalSeeds(normalized),
+      retrieval_seed_details: seedDetails,
+      optional_provider_evidence: providerEvidence,
+      inspection_trace: buildInspectionTrace(normalized, matches, providerEvidence),
+      prompt_injection_detected: injection,
+      hypotheses: intentAssessment.work_intent === "request_fulfillment" ? [] : hypotheses(normalized, matches, providerEvidence),
+      publish_result: publishResult,
+    };
+    const reportName = intentAssessment.work_intent === "request_fulfillment" ? "fulfillment.md" : "diagnosis.md";
+    const reportFile = path.join(root, reportName);
+    fs.writeFileSync(reportFile, report);
     fs.writeFileSync(path.join(root, "case-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
-    return {status: "complete", issue_key: normalized.source.issue_key, report, case_dir: keepTemp || !temporary ? root : null, bundle: keepTemp || !temporary ? collection.bundle : null, kb_matches: matches, provider_evidence: providerEvidence, publish_result: publishResult};
+    return {
+      status: "complete",
+      issue_key: normalized.source.issue_key,
+      report,
+      report_file: keepTemp || !temporary ? reportFile : null,
+      case_dir: keepTemp || !temporary ? root : null,
+      bundle: keepTemp || !temporary ? collection.bundle : null,
+      intent_assessment: intentAssessment,
+      kb_matches: matches,
+      provider_evidence: providerEvidence,
+      publish_result: publishResult,
+    };
   } catch (error) {
     if (stage === "jira_collection") {
       const failure = classifyJiraCollectionFailure(error.message);
@@ -360,7 +571,7 @@ async function main() {
   const result = await runCase(args);
   if (result.report) console.log(result.report);
   else console.log(JSON.stringify(result, null, 2));
-  console.error(JSON.stringify({status: result.status, issue_key: result.issue_key, case_dir: result.case_dir, publish_result: result.publish_result}, null, 2));
+  console.error(JSON.stringify({status: result.status, issue_key: result.issue_key, work_intent: result.intent_assessment?.work_intent, planning_status: result.intent_assessment?.planning_status, case_dir: result.case_dir, report_file: result.report_file, publish_result: result.publish_result}, null, 2));
   return result.status === "complete" ? 0 : 1;
 }
 
