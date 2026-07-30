@@ -41,10 +41,16 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "application": {"$ref": "#/$defs/stringArray"},
+            "event_timestamp": {"$ref": "#/$defs/stringArray"},
             "request_type": {"$ref": "#/$defs/stringArray"},
             "question_classification": {"$ref": "#/$defs/stringArray"},
             "issue_category": {"$ref": "#/$defs/stringArray"},
-            "environment": {"$ref": "#/$defs/stringArray"}
+            "environment": {"$ref": "#/$defs/stringArray"},
+            "request_id": {"$ref": "#/$defs/stringArray"},
+            "source_environment": {"$ref": "#/$defs/stringArray"},
+            "subscription": {"$ref": "#/$defs/stringArray"},
+            "target_environment": {"$ref": "#/$defs/stringArray"}
           }
         }
       }
@@ -108,6 +114,18 @@
         }
       }
     },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_log_placements"],
+      "properties": {
+        "component_log_placements": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {"$ref": "#/$defs/componentLogPlacement"}
+        }
+      }
+    },
     "optional_evidence_providers": {
       "type": "array",
       "items": {
@@ -139,7 +157,44 @@
             ]
           },
           "config": {"type": "object"}
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"provider_id": {"const": "kubectl"}},
+              "required": ["provider_id"]
+            },
+            "then": {
+              "properties": {
+                "config": {"$ref": "#/$defs/kubectlConfig"}
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {"provider_id": {"const": "loki"}},
+              "required": ["provider_id"]
+            },
+            "then": {
+              "properties": {
+                "capabilities": {
+                  "items": {
+                    "enum": [
+                      "loki.gateway.health",
+                      "loki.labels.list",
+                      "loki.label.values",
+                      "loki.stream.selector.resolve",
+                      "loki.index.stats",
+                      "loki.logs.query_excerpt",
+                      "loki.logs.topk_api_status"
+                    ]
+                  }
+                },
+                "config": {"$ref": "#/$defs/lokiConfig"}
+              }
+            }
+          }
+        ]
       }
     }
   },
@@ -158,6 +213,138 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
+    },
+    "componentLogPlacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "component",
+        "environment_keywords",
+        "cluster_ref",
+        "tenant_id",
+        "stream_selector"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "component": {"$ref": "#/$defs/id"},
+        "environment_keywords": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+          }
+        },
+        "cluster_ref": {"$ref": "#/$defs/id"},
+        "tenant_id": {"$ref": "#/$defs/id"},
+        "stream_selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "match"],
+          "properties": {
+            "label": {"const": "apiId"},
+            "match": {"const": "nonempty"}
+          }
+        },
+        "stream_selector_candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["label", "value_source"],
+                "properties": {
+                  "label": {"enum": ["application", "apiId", "apis", "plugin_name", "productId", "project", "region", "tenant"]},
+                  "value_source": {"enum": ["application", "log_identity"]}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["label", "value_source", "value"],
+                "properties": {
+                  "label": {"enum": ["application", "apiId", "apis", "plugin_name", "productId", "project", "region", "tenant"]},
+                  "value_source": {"const": "fixed"},
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\u0000\\r\\n]+$"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "lokiConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateways"],
+      "properties": {
+        "gateways": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cluster_ref", "gateway_url"],
+            "properties": {
+              "cluster_ref": {"$ref": "#/$defs/id"},
+              "gateway_url": {
+                "type": "string",
+                "pattern": "^https://[^/?#]+/?$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "kubectlConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routes"],
+      "properties": {
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "match", "cluster_alias"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "cluster_alias": {"$ref": "#/$defs/id"},
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["keywords", "match_mode"],
+                "properties": {
+                  "keywords": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+                    }
+                  },
+                  "match_mode": {"const": "any"}
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

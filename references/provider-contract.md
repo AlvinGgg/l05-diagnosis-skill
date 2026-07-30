@@ -24,6 +24,9 @@ The default report includes each sanitized Evidence Record `data` block so the A
 
 Jira collection failure stops before Provider discovery. Missing, timed-out, malformed, or blocked Providers create Evidence Gaps and do not disable unrelated diagnosis branches.
 
+Loki is excluded from this generic auto-invocation loop. It requires a
+validated `l05-evidence-plan/v1` after a concrete hypothesis exists.
+
 ## Provider requirements
 
 - Return observed evidence, provenance, confidence, candidates, and gaps. Do not return an autonomous final diagnosis.
@@ -49,6 +52,71 @@ objects, arbitrary CRDs, proxy subresources, exec/attach/cp/debug,
 port-forward, impersonation, and every mutation. A kubeconfig fingerprint
 change, unvalidated context, or write-capable RBAC sentinel returns `blocked`
 without fallback.
+
+The Kubernetes Provider also exposes two narrow Loki-support capabilities:
+
+- `k8s.application.identity` returns one consistent `application` label from
+  the selected Pod/workload, falling back to the Namespace label only when the
+  Pod label is absent.
+- `k8s.loki_gateway.resolve` returns one TLS Gateway candidate from an
+  installer-locked Namespace, backend Service, Ingress/class, and DNS suffix
+  policy. It performs an exact Ingress re-read and retains resource-version
+  and UID fingerprints.
+
+Neither capability may return arbitrary labels, raw Kubernetes objects,
+Secrets, kubeconfig details, or an operator-supplied URL.
+
+## Loki Provider boundary
+
+The independent `l05-loki-provider` owns HTTPS and LogQL construction. Core
+owns the evidence question, strict Evidence Plan, cluster resolution,
+dependency order, and case-wide budget.
+
+- The Kubectl Profile `routes[]` directory owns canonical cluster references
+  and cluster/environment/subscription keywords. The Loki Profile stores only
+  `gateways[]` entries containing an exact Kubectl `cluster_ref` and
+  `gateway_url`. Loki never stores aliases, tenant, component mappings, label
+  rules, LogQL, headers, or credentials. Ordered selector rules live only in
+  the separate Core-owned component placement directory.
+- Core owns the separate enterprise
+  `observability.component_log_placements[]` directory. A placement binds a
+  public component and environment keyword to one canonical Kubectl cluster,
+  one fixed tenant, a fixed non-empty `apiId` aggregation selector, and up to
+  four ordered allowlisted identity-selector candidates. Candidate values may
+  come from the confirmed Application, a label-independent log identity, or a
+  fixed private enterprise component mapping; Jira and the Evidence Plan can
+  supply none of these label names or fixed mappings directly.
+- For targets without a component placement, `tenantId` must equal the
+  confirmed Application. When the Application is missing, Core may consume
+  only the typed Kubectl Application identity.
+- The Provider accepts no URL, header, method, body, raw query, LogQL, regex,
+  parser, proxy, retry, or concurrency override from Jira or the Evidence
+  Plan.
+- Before an index/log query, the Provider calls the tenant-scoped `/labels`
+  endpoint for the exact query window and retains only allowlisted keys in
+  process memory. It then checks `/label/<candidate>/values` in Profile order.
+  A missing key or value advances to the next candidate; only exhaustion is a
+  no-match. Returned key/value caches are never written to disk or copied into
+  case evidence; the handling trail records only candidate outcomes and a
+  selected-value fingerprint.
+- Ordinary queries are serial, bounded to five minutes, estimated through
+  `index/stats`, filtered with internally escaped literals, and stopped by a
+  locked byte budget. Fixed `topk-api-status` aggregation may cover at most one
+  hour in serial five-minute partitions and emits only final `apiId` counts.
+- A Kubectl-discovered candidate may receive only one fixed
+  `/loki/api/v1/labels` health probe over at most 60 seconds. The request must
+  use a validated `tenantId = application`, and the Provider discards returned
+  label names and values. Index, label projection, and log queries require an
+  authorized, backed-up, atomically written, reloaded Profile entry.
+- Gateway health, selector resolution, index estimate, each log target, Kubectl identity/Gateway
+  discovery, Profile reconciliation, no-match, block, and budget stop are
+  separate handling-trail steps.
+
+A plan may query more than one target only when current evidence justifies the
+next target. A later target may declare `correlation_from` only for an earlier
+target. The Loki Provider then extracts exactly one correlation ID, uses it
+only in memory for the dependent query, and exposes only fingerprints and
+masked excerpts.
 
 ## Profile example
 

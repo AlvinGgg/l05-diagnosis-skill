@@ -11,6 +11,14 @@ an investigation or request-fulfillment plan.
 - Code: Repository, requested ref, resolved Commit, resolution basis, file path, symbol/config key, and whether the execution version was confirmed. For an explicitly enabled local Repository, also record branch and dirty/sync state.
 - Browser: URL/page state only when Chrome/browser evidence was used.
 - Kubernetes: Provider capability, safe context alias, Namespace, Kind/Name, resource version or collection time, projected fields, RBAC/TLS state, truncation/redaction, and gaps. Never include a kubeconfig, raw object, Secret, endpoint address list, or unredacted log.
+- Loki: Evidence Plan question and source, canonical Kubectl cluster reference, target role,
+  label-independent log identity when present, tenant label/selector-resolution outcome,
+  tenant source (never a credential), bounded time range and limit, Gateway
+  source, index estimate, projected/redacted excerpt count, safe scan stats,
+  aggregation partition completion and final TopK counts when applicable,
+  truncation/budget state, and gaps. Record query and tenant fingerprints
+  instead of raw LogQL, headers, Gateway URLs, full correlation IDs, or
+  unredacted log lines.
 - Missing: concrete fields, logs, screenshots, environments, namespaces, pipeline IDs, or owner input still required.
 - Token/cache: exact runtime usage only if Codex exposes it for the current run.
 
@@ -26,6 +34,12 @@ an investigation or request-fulfillment plan.
 - Do not present LLM-generated reasoning as an authoritative operational fact.
 - Do not claim that Jira, code, or browser state was verified unless the relevant tool was actually run.
 - Give the Skill user a mandatory `本次处理链路` containing every evidence source actually inspected or attempted. For each step record status, purpose, safe source/target, query scope, result, effect on the conclusion, and exact safe references such as Repository/ref/file, Jenkins job/build URL, KB path, Provider, or browser URL. Mark failed access as failed and retain the resulting gap; use `not_run` only when an intent or safety gate stopped downstream retrieval. Omit unused evidence types and keep this trail out of the customer-facing Jira draft.
+- When Loki is planned, matched, called, skipped by budget, or blocked, retain
+  every distinct step: Application identity, Gateway Profile selection,
+  Gateway health, tenant label/selector resolution, index estimate, each
+  tenant/role query, optional Gateway discovery, and Profile reconciliation. A
+  Loki observation remains evidence; it cannot by itself promote root cause or
+  fulfillment status.
 - Generate a ready-to-paste troubleshooting reply only for a `confirmed` root cause. A consultation reply may be generated when authoritative documentation or current code supports the guidance. Both must distinguish completed actions and observed verification from recommendations and pending verification.
 - For fulfillment, distinguish `requester_input`, `sre_precheck`, `approval_input`, and `evidence_gap`. Ask the requester only for information they reasonably own; keep internal current-state checks in the SRE runbook.
 - A fulfillment runbook must include target/exclusions, current-state snapshot, evidence-backed steps, stop conditions, validation, rollback, and completion evidence. Documentation proves supported product behavior, not current production state.

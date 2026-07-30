@@ -45,11 +45,14 @@ flowchart TD
 - 秘密：`~/.codex/l05-diagnosis.env`
 - 非秘密配置：`<vault>/.l05-profile.json`
 
-Provider 未安装、无权限或无匹配结果时，只记录 Evidence Gap，不影响 Jira 和 Vault 主流程。安装和契约说明见 `references/provider-contract.md` 与对应独立 Provider 的 README。
+Provider 未安装、无权限或无匹配结果时，只记录 Evidence Gap，不影响 Jira 和 Vault 主流程。安装和契约说明见 `references/provider-contract.md` 与对应独立 Provider 的 Skill instructions。
 
-已实现的独立本地 Provider 包括 Jenkins 构建证据和 Kubectl 只读
-Kubernetes 证据。Kubectl Provider 只接受由安装器写入私有策略并锁定的
-kubeconfig 路径，不开放自由命令，不读取 Secret，也不执行集群写操作。
+已实现的独立本地 Provider 包括 Jenkins 构建证据、Kubectl 只读 Kubernetes
+证据和 Loki 有界日志证据。Kubectl Provider 只接受由安装器写入私有策略并锁定的
+kubeconfig 路径，不开放自由命令，不读取 Secret，也不执行集群写操作。Loki
+Provider 只在具体证据问题和严格 `l05-evidence-plan/v1` 下调用；Core 负责串行调度、
+总预算、Gateway 对账和逐步骤处理链，Provider 不接受调用方提供的 URL、Header、
+LogQL、正则或自由查询。
 
 - **默认只读**：不会评论、转派、变更状态或执行其他 Jira 写操作。
 - **人工审核**：问题类只有根因得到当前证据确认时才生成完整回复；需求类只有执行和验证证据齐全后才生成可发送的完成回复。
@@ -67,10 +70,11 @@ kubeconfig 路径，不开放自由命令，不读取 Secret，也不执行集�
 | 代码分析 | 优先获取指定分支、Tag 或 Commit 的隔离远程快照 |
 | 浏览器与运行时 | 由 Agent 在必要且已授权时使用可用工具补充证据 |
 | Kubernetes | 通过独立 Kubectl Provider 读取投影后的 Ingress、Service、Endpoint、Workload、Pod、Event 和受控日志证据 |
+| Loki | 在具体假设和严格 Evidence Plan 下，通过独立 Loki Provider 串行执行健康检查、选择器解析、索引预估和脱敏小查询 |
 | 处理输出 | 问题类输出结构化诊断；需求类输出 SRE runbook、用户补充草稿、验证、回滚和完成后回复模板 |
 | 知识沉淀 | 明确授权后生成脱敏 Inbox 候选，等待人工整理 |
 
-当前 Core 不内置企业 Provider。Jenkins 与 Kubectl 已作为独立可选包实现；CMDB、Loki 和团队 Git 知识库仍是后续扩展，也都不是本地运行依赖。
+当前 Core 不内置企业 Provider。Jenkins、Kubectl 与 Loki 已作为独立可选包实现；CMDB 和团队 Git 知识库仍是后续扩展，也都不是本地运行依赖。
 
 ## 环境要求
 

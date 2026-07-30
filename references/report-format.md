@@ -40,6 +40,15 @@ enumerate every tool that could hypothetically have been used. This trace
 describes observable actions and evidence provenance; it must not expose hidden
 reasoning, secrets, raw sensitive logs, or unsafe internal values.
 
+When a Loki Evidence Plan is present, use one line item per attempted
+capability or dependency step. Include the safe canonical cluster reference, target role,
+bounded time/limit or capability, status, projected result/scan budget, and
+effect on the hypothesis. Never include the Gateway URL, raw LogQL,
+`X-Scope-OrgID`, full request ID, or unredacted log body. A failed readiness
+check, oversized index estimate, no-match, missing Application identity,
+Gateway discovery, or Profile-update requirement must remain visible in
+`本次处理链路`.
+
 Keep `本次处理链路` outside the requester-facing Jira draft. The draft may remain
 compact and include only the decisive evidence the requester needs.
 

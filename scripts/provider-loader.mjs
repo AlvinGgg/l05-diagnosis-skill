@@ -58,15 +58,19 @@ export function discoverProviderManifests(providerDir = process.env.L05_PROVIDER
   return {directory, providers, gaps};
 }
 
-function profileProviderEntries(kbRoot) {
+export function loadProfile(kbRoot) {
   const file = path.join(path.resolve(kbRoot), ".l05-profile.json");
-  if (!fs.existsSync(file)) return [];
+  if (!fs.existsSync(file)) return null;
   try {
-    const profile = JSON.parse(fs.readFileSync(file, "utf8"));
-    return Array.isArray(profile.optional_evidence_providers) ? profile.optional_evidence_providers : [];
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function profileProviderEntries(kbRoot) {
+  const profile = loadProfile(kbRoot);
+  return Array.isArray(profile?.optional_evidence_providers) ? profile.optional_evidence_providers : [];
 }
 
 function issueText(issue) {
@@ -132,9 +136,9 @@ export function validateProviderResponse(value, manifest) {
   return {valid: errors.length === 0, errors};
 }
 
-async function invokeProvider(manifest, request, {timeoutMs = 120000, env = process.env} = {}) {
+export async function invokeProvider(manifest, request, {timeoutMs = 120000, env = process.env} = {}) {
   try {
-    const {stdout, stderr} = await new Promise((resolve, reject) => {
+    const {stdout, stderr, code} = await new Promise((resolve, reject) => {
       const child = spawn(manifest.command[0], manifest.command.slice(1), {env: {...env}, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"]});
       const stdoutChunks = [];
       const stderrChunks = [];
@@ -165,8 +169,11 @@ async function invokeProvider(manifest, request, {timeoutMs = 120000, env = proc
       child.stderr.on("data", collect(stderrChunks));
       child.on("error", (error) => finish(reject, error));
       child.on("close", (code) => {
-        if (code !== 0) return finish(reject, Object.assign(new Error("provider exited non-zero"), {code: `EXIT_${code}`}));
-        finish(resolve, {stdout: Buffer.concat(stdoutChunks).toString("utf8"), stderr: Buffer.concat(stderrChunks).toString("utf8")});
+        finish(resolve, {
+          code,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        });
       });
       child.stdin.end(`${JSON.stringify(request)}\n`);
     });
@@ -175,6 +182,7 @@ async function invokeProvider(manifest, request, {timeoutMs = 120000, env = proc
     const validation = validateProviderResponse(sanitized, manifest);
     if (!validation.valid) return {provider_id: manifest.provider_id, status: "blocked", evidence_records: [], gaps: validation.errors.map((item) => `provider_response:${item}`)};
     if (stderr.trim()) sanitized.gaps = [...sanitized.gaps, "provider_wrote_stderr"];
+    if (sanitized.status !== "blocked" && code !== 0) sanitized.gaps = [...sanitized.gaps, "provider_exited_nonzero"];
     return sanitized;
   } catch (error) {
     const reason = error.killed ? "timeout" : error.code === "ENOENT" ? "command_not_found" : "execution_failed";
@@ -187,8 +195,13 @@ export async function collectOptionalEvidence({kbRoot, issue, retrievalSeedDetai
   const problemType = inferProblemType(issue);
   const responses = [];
   const gaps = [...discovery.gaps];
+  const deferredProviders = [];
   for (const entry of profileProviderEntries(kbRoot)) {
     if (!entry || typeof entry !== "object" || entry.enabled === false || !providerEntryMatches(entry, issue, problemType)) continue;
+    if (entry.provider_id === "loki") {
+      deferredProviders.push("loki");
+      continue;
+    }
     const manifest = discovery.providers.get(entry.provider_id);
     if (!manifest) {
       gaps.push(`provider_not_installed:${entry.provider_id || "unknown"}`);
@@ -218,5 +231,11 @@ export async function collectOptionalEvidence({kbRoot, issue, retrievalSeedDetai
     responses.push(response);
     gaps.push(...response.gaps.map((item) => `${entry.provider_id}:${item}`));
   }
-  return {provider_directory: discovery.directory, problem_type: problemType, responses, gaps};
+  return {
+    provider_directory: discovery.directory,
+    problem_type: problemType,
+    responses,
+    gaps,
+    deferred_providers: uniqueStrings(deferredProviders),
+  };
 }

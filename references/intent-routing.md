@@ -77,6 +77,25 @@ ask to create, configure, grant, resize, migrate, switch, remove, or otherwise
 change a named object. Requiring SRE is an ownership signal, not proof of this
 intent by itself.
 
+Do not turn a fulfillment request into `mixed` merely because SRE must inspect
+the current state before changing it. Treat the missing or undesired current
+state as a fulfillment precheck when the requester explicitly asks for the new
+state. Add a separate investigation work item only when the requester also asks
+why an expected existing state failed, regressed, or behaved unexpectedly, or
+when the requested change depends on an unresolved causal explanation.
+
+Examples:
+
+- "Request Type 显示无权限，如何开放权限" is permission fulfillment; current
+  access and the exact control point are SRE prechecks.
+- "请屏蔽已列出的暴露路径" is security-policy fulfillment; verifying the
+  exact exposed paths, control point, and unaffected traffic is a precheck.
+- "如何在 Ingress 限制 PUT/DELETE" is configuration fulfillment; ambiguous
+  security semantics may block planning but do not by themselves create a
+  second investigation outcome.
+- "QA 配置之前生效、现在又失效；修复后迁移到生产" is `mixed`: investigate
+  the regression first, then fulfill the dependent production migration.
+
 Choose `mixed` when both outcomes remain current:
 
 - split investigation and fulfillment into separate sub-tasks;

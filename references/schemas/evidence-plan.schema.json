@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "L05 Evidence Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "evidence_question",
+    "cluster_alias",
+    "time_anchor",
+    "targets"
+  ],
+  "properties": {
+    "schema_version": {"const": "l05-evidence-plan/v1"},
+    "case_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "evidence_question": {"type": "string", "minLength": 1, "maxLength": 300},
+    "cluster_alias": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "time_anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "source"],
+      "properties": {
+        "start": {"type": "string", "format": "date-time"},
+        "end": {"type": "string", "format": "date-time"},
+        "source": {"type": "string", "minLength": 1}
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target_id", "role", "filters", "limit", "triggered_by"],
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          },
+          "role": {
+            "enum": [
+              "primary-application",
+              "gateway-access",
+              "gateway-plugin",
+              "api-management",
+              "service-discovery",
+              "config-service",
+              "upstream",
+              "downstream"
+            ]
+          },
+          "application": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "kubernetes_target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "Deployment",
+                  "StatefulSet",
+                  "DaemonSet",
+                  "Job",
+                  "Pod",
+                  "Service",
+                  "Ingress"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$"
+              }
+            }
+          },
+          "log_identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "source"],
+            "properties": {
+              "value": {"type": "string", "minLength": 1, "maxLength": 256},
+              "source": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+            }
+          },
+          "filters": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "exact_terms": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "minLength": 1, "maxLength": 256}
+              },
+              "fuzzy_terms": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {"type": "string", "minLength": 1, "maxLength": 96}
+              },
+              "error_only": {"type": "boolean"}
+            }
+          },
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+          "correlation_from": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+          },
+          "aggregation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "status_code", "top_k"],
+            "properties": {
+              "kind": {"const": "topk-api-status"},
+              "status_code": {"type": "integer", "minimum": 100, "maximum": 599},
+              "top_k": {"type": "integer", "minimum": 1, "maximum": 10}
+            }
+          },
+          "triggered_by": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {"type": "string", "minLength": 1, "maxLength": 160}
+          }
+        },
+        "oneOf": [
+          {"required": ["application"], "not": {"required": ["kubernetes_target"]}},
+          {"required": ["kubernetes_target"], "not": {"required": ["application"]}}
+        ]
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_log_queries": {"type": "integer", "minimum": 1, "maximum": 13},
+        "max_tenants": {"type": "integer", "minimum": 1, "maximum": 4},
+        "max_scan_bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "max_entries": {"type": "integer", "minimum": 1, "maximum": 200}
+      }
+    }
+  }
+}

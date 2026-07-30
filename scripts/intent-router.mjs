@@ -7,7 +7,7 @@ const TROUBLESHOOTING_SIGNALS = [
   {
     signal: "observed_failure_or_unexpected_behavior",
     strength: 1,
-    pattern: /失败|报错|异常|无法|不可用|中断|无响应|错误码|请求.{0,16}超时|超时(?:错误|中断|断开|失败)|为什么|根因|\b(?:failed|failure|error|exception|unavailable|cannot|can't|unable|broken|timed?\s*out|not working|root cause|gateway timeout|request timeout|why)\b/i,
+    pattern: /失败|报错|异常|无法|不可用|中断|无响应|错误码|不生效|未生效|失效|读取不到|读不到|仍(?:然)?(?:使用|是|为)?默认|还是默认|再次.{0,12}(?:失败|失效)|又.{0,12}(?:失败|失效)|请求.{0,16}超时|超时(?:错误|中断|断开|失败)|为什么|根因|\b[45]\d{2}\b|\b(?:failed|failure|error|exception|unavailable|cannot|can't|unable|broken|timed?\s*out|not working|not effective|stopped working|regressed|root cause|gateway timeout|request timeout|why)\b/i,
   },
 ];
 
@@ -15,12 +15,17 @@ const FULFILLMENT_SIGNALS = [
   {
     signal: "explicit_fulfillment_request",
     strength: 2,
-    pattern: /(?:请|需要|希望|申请|要求|帮忙|协助).{0,24}(?:创建|新增|开通|配置|修改|变更|授权|扩容|迁移|切换|下线|设置|调整|指向|部署)|\b(?:please|need|request|want|require)\b.{0,60}\b(?:create|add|enable|configure|change|update|grant|provision|migrate|switch|expand|remove|decommission|deploy|set|increase)\b/i,
+    pattern: /(?:(?<!申)请(?!求)|需要|希望|申请|要求|帮忙|协助).{0,24}(?:创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流)|\b(?:please|need|request|want|require)\b.{0,60}\b(?:create|add|enable|configure|change|update|grant|provision|migrate|switch|expand|remove|decommission|deploy|set|increase|block|restrict|rate limit)\b/i,
+  },
+  {
+    signal: "how_to_fulfillment_request",
+    strength: 2,
+    pattern: /如何.{0,24}(?:创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流)|\bhow (?:can|do|should|to)\b.{0,60}\b(?:create|add|enable|configure|change|update|grant|provision|migrate|switch|expand|remove|decommission|deploy|set|increase|block|restrict|rate limit)\b/i,
   },
   {
     signal: "explicit_desired_state",
     strength: 2,
-    pattern: /(?:设置|调整|修改|改|变更).{0,24}(?:为|到)|(?:切换|迁移).{0,24}(?:至|到)|指向|新增|开通|授权|扩容|下线|\b(?:change|set|switch|migrate|point|increase|update)\b.{0,60}\b(?:to|from)\b/i,
+    pattern: /(?:设置|调整|修改|改|变更).{0,24}(?:为|到)|(?:切换|迁移).{0,24}(?:至|到)|指向|新增|开通|授权|开放|扩容|下线|接入|屏蔽|限制|限流|\b(?:change|set|switch|migrate|point|increase|update|block|restrict|rate limit)\b.{0,60}\b(?:to|from|for)\b/i,
   },
 ];
 
@@ -81,6 +86,29 @@ function findSignal(definitions, text) {
   return definitions.find((definition) => definition.pattern.test(text));
 }
 
+function contentClauses(text) {
+  return String(text || "")
+    .split(/[\n\r。！？!?；;，,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function historicalFulfillmentOnly(text) {
+  const action = /创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流|申请|绑定/i;
+  const historical = /(?:已|已经|此前|之前|原来|曾经|先前).{0,32}(?:创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流|申请|绑定)|(?:申请|配置|绑定|迁移|部署|设置)(?:了|.{0,8}(?:后|完成后))/i;
+  const currentRequest = /(?:(?<!申)请(?!求)|需要|希望|要求|帮忙|协助|现在|当前|本次).{0,24}(?:创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流)|如何.{0,24}(?:创建|新增|开通|配置|修改|变更|授权|开放|扩容|迁移|切换|下线|设置|调整|指向|部署|接入|屏蔽|限制|限流)/i;
+  return action.test(text) && historical.test(text) && !currentRequest.test(text);
+}
+
+function nonProblemConstraintClause(text) {
+  return /无法.{0,12}(?:修改|变更|调整).{0,12}(?:源码|代码|应用)/i.test(text)
+    && !/失败|报错|异常|不可用|不生效|未生效|失效|读取不到|读不到|\b[45]\d{2}\b/i.test(text);
+}
+
+function investigationQuestionClause(text) {
+  return /(?:请(?:帮忙)?(?:看看|确认|排查|分析)|帮忙(?:看看|确认|排查|分析)).{0,24}(?:是否|是不是)|是否是|是不是|为什么|根因|原因/i.test(text);
+}
+
 function signalRecord(route, record, definition) {
   return {
     source: record.source,
@@ -97,8 +125,15 @@ function classifySignals(issue, fieldMappings) {
   const records = sourceRecords(issue, fieldMappings);
   const signals = {problem_investigation: [], request_fulfillment: []};
   for (const record of records) {
-    const troubleshooting = findSignal(TROUBLESHOOTING_SIGNALS, record.text);
-    const fulfillment = findSignal(FULFILLMENT_SIGNALS, record.text);
+    const clauses = contentClauses(record.text);
+    const troubleshooting = clauses
+      .map((clause) => nonProblemConstraintClause(clause) ? null : findSignal(TROUBLESHOOTING_SIGNALS, clause))
+      .find(Boolean);
+    const fulfillment = clauses
+      .map((clause) => historicalFulfillmentOnly(clause) || investigationQuestionClause(clause)
+        ? null
+        : findSignal(FULFILLMENT_SIGNALS, clause))
+      .find(Boolean);
     if (troubleshooting) signals.problem_investigation.push(signalRecord("problem_investigation", record, troubleshooting));
     if (fulfillment) signals.request_fulfillment.push(signalRecord("request_fulfillment", record, fulfillment));
   }

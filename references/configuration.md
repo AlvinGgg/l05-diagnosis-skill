@@ -60,25 +60,135 @@ putting organization identifiers in the Skill:
 }
 ```
 
-Allowed slots are `request_type`, `question_classification`,
-`issue_category`, and `environment`. Selectors must be unique, non-empty
-strings. These mappings are auxiliary intent signals; they do not override
-explicit current requester text or prove root cause/current configuration.
+Allowed slots are `application`, `event_timestamp`, `request_type`,
+`question_classification`, `issue_category`, `environment`, `request_id`,
+`source_environment`, `subscription`, and `target_environment`. Selectors must
+be unique, non-empty strings. These mappings are auxiliary intent and Evidence
+Plan signals; explicit user environment information takes precedence, and no
+mapping proves root cause or current configuration.
 
 ## Optional Evidence Providers
 
 Providers are local optional packages, not bundled enterprise behavior. Install each Provider Manifest under `~/.codex/l05-diagnosis/providers.d/`, keep its credentials in `~/.codex/l05-diagnosis.env`, and add only non-secret routing and settings to the Vault `.l05-profile.json`.
 
-The Core supports `L05_PROVIDER_DIR` to override the Manifest directory for tests or managed installations. Do not put Tokens, passwords, cookies, private keys, or authenticated URLs in the Profile. See `provider-contract.md` and the independent Provider package README.
+The Core supports `L05_PROVIDER_DIR` to override the Manifest directory for tests or managed installations. Do not put Tokens, passwords, cookies, private keys, or authenticated URLs in the Profile. See `provider-contract.md` and the independent Provider package instructions.
 
 The local Kubectl Provider is an exception to generic credential discovery:
 it accepts only the kubeconfig path pinned by its installer in a private local
 policy, stores the non-secret locked policy at
 `~/.codex/l05-diagnosis/kubectl-policy.json`, and exposes no kubeconfig
 override. Keep context names and Namespace allowlists in that `0600` policy.
-The Vault Profile may contain only safe route signals, a `cluster_alias`, and
-Namespace hints; it must not contain kubeconfig, context, server, identity,
-TLS, command, argument, selector, template, or raw API override fields.
+The Vault Profile may contain only canonical cluster-level route keywords and
+a `cluster_alias`. It must not contain Namespace/Application/business hints,
+kubeconfig, context, server, identity, TLS, command, argument, selector,
+template, or raw API override fields.
+
+```json
+{
+  "provider_id": "kubectl",
+  "enabled": true,
+  "capabilities": ["k8s.context.health", "k8s.loki_gateway.resolve"],
+  "match": {
+    "problem_types": ["gateway.*", "kubernetes.*"],
+    "match_mode": "any"
+  },
+  "config": {
+    "routes": [
+      {
+        "id": "example-qa",
+        "match": {
+          "keywords": ["example-qa", "example-subscription"],
+          "match_mode": "any"
+        },
+        "cluster_alias": "example-qa"
+      }
+    ]
+  }
+}
+```
+
+### Loki Provider Profile
+
+Install the independent Loki Provider with a private locked DNS-suffix policy.
+The Vault Profile contains only the cluster/Gateway directory:
+
+```json
+{
+  "provider_id": "loki",
+  "enabled": true,
+  "capabilities": [
+    "loki.gateway.health",
+    "loki.stream.selector.resolve",
+    "loki.index.stats",
+    "loki.logs.query_excerpt",
+    "loki.logs.topk_api_status"
+  ],
+  "match": {
+    "problem_types": ["gateway.*", "kubernetes.*", "support.*"],
+    "match_mode": "any"
+  },
+  "config": {
+    "gateways": [
+      {
+        "cluster_ref": "example-qa",
+        "gateway_url": "https://logs.example.test"
+      }
+    ]
+  }
+}
+```
+
+Do not add tenant, component, application, label, query, header, authentication,
+or budget mappings to this Provider config. Ordinary application identity comes
+from current Jira/user evidence or typed Kubectl evidence. Public component
+placement is a separate Core-owned Profile section:
+
+```json
+{
+  "observability": {
+    "component_log_placements": [
+      {
+        "id": "example-gateway-prod",
+        "component": "example-gateway",
+        "environment_keywords": ["prod"],
+        "cluster_ref": "example-prod",
+        "tenant_id": "example-gateway-tenant",
+        "stream_selector": {"label": "apiId", "match": "nonempty"},
+        "stream_selector_candidates": [
+          {"label": "plugin_name", "value_source": "fixed", "value": "example-plugin"},
+          {"label": "apis", "value_source": "log_identity"},
+          {"label": "apiId", "value_source": "log_identity"},
+          {"label": "application", "value_source": "application"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+Each placement must reference a canonical cluster already present in Kubectl
+`config.routes`. Selector candidates are tried in order after Loki reports the
+tenant's keys for the exact query window. `log_identity` is a value such as an
+API name derived from a URL or Jira evidence; the Evidence Plan cannot choose
+the label. A `fixed` value is allowed only in this private enterprise component
+placement and is still verified through tenant label-key and label-value
+discovery before any log query. Discovery caches remain only in the current
+Provider process. The placement is not part of Kubectl routing or Loki Gateway
+config.
+
+If a cluster entry is missing or stale, Core may perform one locked Kubectl
+Gateway discovery and one fixed readiness check. Preview reconciliation with:
+
+```bash
+python3 scripts/l05_profile.py reconcile-loki-gateway \
+  --vault /absolute/path/to/vault \
+  --evidence-file /absolute/path/to/typed-reconciliation-evidence.json
+```
+
+Apply only after explicit authorization by adding `--apply`. The command
+requires fresh matching Kubectl and Loki health evidence, creates a backup,
+writes atomically, and validates the reloaded Profile. It never changes the
+cluster.
 
 ## Optional configuration
 
