@@ -1,17 +1,19 @@
 import os
 import json
+import hashlib
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from fetch_jira_issue import load_missing_l05_env, load_missing_zshrc_env
 from inspect_github_actions import inspect, parse_actions_url
-from l05_profile import validate_profile
+from l05_profile import reconcile_loki_gateway, validate_profile
 from link_inspector import classify_response, classify_url, redact_url
 from safe_preview import preview
 
@@ -343,6 +345,241 @@ class SafetyTests(unittest.TestCase):
         validation = validate_profile(profile)
         self.assertFalse(validation["valid"])
         self.assertIn("profile_must_not_contain_secret_fields", {item["code"] for item in validation["errors"]})
+
+    def test_profile_loki_config_contains_only_cluster_gateway_routing(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        provider = {
+            "provider_id": "loki",
+            "enabled": True,
+            "capabilities": [
+                "loki.gateway.health",
+                "loki.stream.selector.resolve",
+                "loki.index.stats",
+                "loki.logs.query_excerpt",
+            ],
+            "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+            "config": {},
+        }
+        kubectl_provider = {
+            "provider_id": "kubectl",
+            "enabled": True,
+            "capabilities": ["k8s.context.health"],
+            "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+            "config": {"routes": [{
+                "id": "example-qa-a",
+                "match": {"keywords": ["example-qa-a", "qa-a"], "match_mode": "any"},
+                "cluster_alias": "example-qa-a",
+            }]},
+        }
+        provider["config"] = {
+            "gateways": [{
+                "cluster_ref": "example-qa-a",
+                "gateway_url": "https://loki.example.test",
+            }]
+        }
+        profile["optional_evidence_providers"] = [kubectl_provider, provider]
+        self.assertTrue(validate_profile(profile)["valid"])
+
+        kubectl_provider["config"]["routes"][0]["namespace_hints"] = ["cmp-gr"]
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("kubectl_route_fields_are_invalid", {item["code"] for item in validation["errors"]})
+        kubectl_provider["config"]["routes"][0].pop("namespace_hints")
+
+        provider["config"]["gateways"][0]["cluster_ref"] = "unmapped-cluster"
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("loki_cluster_ref_is_not_in_kubectl_routes", {item["code"] for item in validation["errors"]})
+        provider["config"]["gateways"][0]["cluster_ref"] = "example-qa-a"
+
+        provider["config"]["tenant"] = "apim"
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("loki_config_must_contain_only_gateways", {item["code"] for item in validation["errors"]})
+
+        provider["config"] = {
+            "gateways": [{
+                "cluster_ref": "example-qa-a",
+                "gateway_url": "http://127.0.0.1:3100",
+            }]
+        }
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("loki_gateway_url_is_invalid", {item["code"] for item in validation["errors"]})
+
+    def test_profile_component_log_placement_is_independent_and_cluster_backed(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        profile["optional_evidence_providers"] = [{
+            "provider_id": "kubectl",
+            "enabled": True,
+            "capabilities": ["k8s.context.health"],
+            "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+            "config": {"routes": [{
+                "id": "example-prod-a",
+                "match": {"keywords": ["example-prod-a", "prod"], "match_mode": "any"},
+                "cluster_alias": "example-prod-a",
+            }]},
+        }, {
+            "provider_id": "loki",
+            "enabled": True,
+            "capabilities": ["loki.gateway.health", "loki.stream.selector.resolve", "loki.logs.topk_api_status"],
+            "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+            "config": {"gateways": [{
+                "cluster_ref": "example-prod-a",
+                "gateway_url": "https://loki.example.test",
+            }]},
+        }]
+        profile["observability"] = {"component_log_placements": [{
+            "id": "apim-prod",
+            "component": "apim",
+            "environment_keywords": ["prod"],
+            "cluster_ref": "example-prod-a",
+            "tenant_id": "apim",
+            "stream_selector": {"label": "apiId", "match": "nonempty"},
+            "stream_selector_candidates": [
+                {"label": "apiId", "value_source": "log_identity"},
+                {"label": "application", "value_source": "application"},
+            ],
+        }]}
+        self.assertTrue(validate_profile(profile)["valid"])
+
+        profile["observability"]["component_log_placements"][0]["stream_selector_candidates"].insert(
+            0,
+            {"label": "plugin_name", "value_source": "fixed", "value": "example-policy-plugin"},
+        )
+        self.assertTrue(validate_profile(profile)["valid"])
+        profile["observability"]["component_log_placements"][0]["stream_selector_candidates"][0].pop("value")
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "component_log_placement_selector_candidate_is_invalid",
+            {item["code"] for item in validation["errors"]},
+        )
+        profile["observability"]["component_log_placements"][0]["stream_selector_candidates"][0]["value"] = "example-policy-plugin"
+
+        profile["observability"]["component_log_placements"][0]["stream_selector_candidates"][0]["label"] = "backendUrl"
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "component_log_placement_selector_candidate_is_invalid",
+            {item["code"] for item in validation["errors"]},
+        )
+        profile["observability"]["component_log_placements"][0]["stream_selector_candidates"][0]["label"] = "plugin_name"
+
+        profile["observability"]["component_log_placements"][0]["cluster_ref"] = "other-prod"
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn(
+            "component_log_placement_cluster_ref_is_not_in_kubectl_routes",
+            {item["code"] for item in validation["errors"]},
+        )
+
+    def test_loki_gateway_reconciliation_requires_typed_fresh_health_evidence(self):
+        skill = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            profile_file = vault / ".l05-profile.json"
+            profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+            profile["optional_evidence_providers"] = [{
+                "provider_id": "kubectl",
+                "enabled": True,
+                "capabilities": ["k8s.context.health"],
+                "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+                "config": {"routes": [{
+                    "id": "example-qa-a",
+                    "match": {"keywords": ["example-qa-a"], "match_mode": "any"},
+                    "cluster_alias": "example-qa-a",
+                }]},
+            }, {
+                "provider_id": "loki",
+                "enabled": True,
+                "capabilities": [
+                    "loki.gateway.health",
+                    "loki.index.stats",
+                    "loki.logs.query_excerpt",
+                ],
+                "match": {"problem_types": ["gateway.*"], "match_mode": "any"},
+                "config": {"gateways": []},
+            }]
+            profile_file.write_text(json.dumps(profile), encoding="utf-8")
+            profile_file.chmod(0o600)
+            gateway_url = "https://loki.example.test"
+            gateway_fingerprint = hashlib.sha256(gateway_url.encode("utf-8")).hexdigest()
+            now = datetime.now(timezone.utc).isoformat()
+            evidence = {
+                "schema_version": "l05-loki-gateway-reconciliation/v1",
+                "kubectl_response": {
+                    "schema_version": "l05-provider-response/v1",
+                    "provider_id": "kubectl",
+                    "status": "ok",
+                    "evidence_records": [{
+                        "capability": "k8s.loki_gateway.resolve",
+                        "evidence_type": "kubernetes_loki_gateway_candidate",
+                        "confidence": "confirmed",
+                        "data": {
+                            "cluster_alias": "example-qa-a",
+                            "rule_host": "loki.example.test",
+                            "tls_host_match": True,
+                            "path": "/",
+                            "backend_service": "loki-gateway",
+                            "resource_version": "17",
+                            "ingress_uid_fingerprint": "sha256:fixture",
+                        },
+                        "provenance": {
+                            "provider": "kubectl",
+                            "access_mode": "read-only",
+                            "approved_kubeconfig": True,
+                            "tls_verified": True,
+                            "collected_at": now,
+                        },
+                    }]
+                },
+                "loki_health_response": {
+                    "schema_version": "l05-provider-response/v1",
+                    "provider_id": "loki",
+                    "status": "ok",
+                    "evidence_records": [{
+                        "capability": "loki.gateway.health",
+                        "data": {
+                            "ready": True,
+                            "gateway_entry_fingerprint": gateway_fingerprint,
+                        },
+                        "provenance": {
+                            "provider": "loki",
+                            "access_mode": "read-only",
+                            "tls_verified": True,
+                            "cluster_alias": "example-qa-a",
+                            "gateway_source": "kubectl_candidate",
+                            "collected_at": now,
+                        },
+                    }]
+                },
+            }
+            evidence_file = vault / "reconciliation.json"
+            evidence_file.write_text(json.dumps(evidence), encoding="utf-8")
+
+            code, preview = reconcile_loki_gateway(
+                profile_file,
+                evidence_file,
+                apply=False,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(preview["status"], "change_ready")
+            self.assertNotIn(gateway_url, json.dumps(preview))
+            self.assertEqual(json.loads(profile_file.read_text())["optional_evidence_providers"][1]["config"]["gateways"], [])
+
+            code, applied = reconcile_loki_gateway(
+                profile_file,
+                evidence_file,
+                apply=True,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(applied["status"], "updated")
+            updated = json.loads(profile_file.read_text())
+            self.assertEqual(updated["optional_evidence_providers"][1]["config"]["gateways"][0]["gateway_url"], gateway_url)
+            self.assertTrue(Path(applied["backup"]).exists())
 
     def test_configure_updates_only_non_secret_values(self):
         skill = Path(__file__).resolve().parents[1]

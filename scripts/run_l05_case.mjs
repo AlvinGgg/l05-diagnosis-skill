@@ -11,6 +11,7 @@ import {loadMissingL05ConfigEnv} from "./vendor/jira-collector/env-loader.mjs";
 import {normalizedContentHash, validateBundle} from "./vendor/jira-collector/validate-jira-bundle.mjs";
 import {evaluateBundle} from "./vendor/ticket-quality/evaluate-jira-ticket-quality.mjs";
 import {collectOptionalEvidence} from "./provider-loader.mjs";
+import {executeEvidencePlan} from "./provider-coordinator.mjs";
 import {assessIntent} from "./intent-router.mjs";
 
 const SKILL_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -317,6 +318,36 @@ function buildInspectionTrace(issue, matches, providerEvidence = null) {
         : "No Provider observation changed the conclusion; any current runtime evidence remains an explicit gap.",
       references: providerRecords.map(({provider_id, record}) => `provider:${provider_id}/${record.capability || "unknown"}`),
     }));
+    for (const step of providerEvidence.inspection_steps || []) {
+      const traceStatus = ["completed", "partial", "failed", "not_run", "completed_no_match"].includes(step.status)
+        ? step.status
+        : "failed";
+      records.push(traceRecord({
+        status: traceStatus,
+        purpose: step.capability === "loki.index.stats"
+          ? "Estimate the bounded Loki selector before reading log entries."
+          : step.capability === "loki.stream.selector.resolve"
+            ? "Discover allowlisted tenant label keys and resolve one matching stream identity before querying logs."
+          : step.capability === "loki.logs.topk_api_status"
+            ? "Aggregate one fixed HTTP status by apiId in bounded serial Loki partitions."
+          : step.capability === "profile.loki_gateway.reconcile"
+            ? "Reconcile a verified Loki Gateway candidate with the enterprise Profile."
+            : step.capability === "k8s.application.identity"
+              ? "Resolve the Loki tenant from the workload or Namespace application label."
+              : step.capability === "k8s.loki_gateway.resolve"
+                ? "Resolve one locked-cluster Loki Gateway candidate through Kubernetes metadata."
+                : step.capability === "loki.gateway.health"
+                  ? "Verify the selected Loki Gateway is ready before a log query."
+                  : "Run one bounded, filtered, read-only Loki log query.",
+        source: `Planned Provider step: ${step.capability}`,
+        scope: `Target ${step.target || "unknown"}${step.gateway_source ? ` through ${step.gateway_source}` : ""}; no transport override accepted from Jira content.`,
+        result: step.result || step.status,
+        impact: step.status === "completed"
+          ? "The observation may support the current diagnosis but does not independently confirm the full causal chain."
+          : "The missing or blocked observation remains an explicit evidence gap.",
+        references: [`provider-step:${step.capability}`],
+      }));
+    }
   }
   return records;
 }
@@ -381,6 +412,129 @@ function renderPendingConfirmations(intent) {
   return intent.pending_confirmations.map((item) => `- ${item.kind}: ${item.item}`).join("\n") || "- No material pending confirmation recorded.";
 }
 
+function safeHttpLocators(text) {
+  const values = String(text || "").match(/https?:\/\/[^\s\]|}'"<]+/gi) || [];
+  const locators = [];
+  for (const value of values) {
+    try {
+      const url = new URL(value.replace(/[.,;:]+$/, ""));
+      if (/(?:^|\.)(?:jira|atlassian)\./i.test(url.hostname)
+        && /\/(?:browse|servicedesk\/customer\/portal)\//i.test(url.pathname)) continue;
+      const locator = `${url.protocol}//${url.host}${url.pathname}`;
+      if (!locators.includes(locator)) locators.push(locator);
+    } catch {}
+  }
+  return locators;
+}
+
+export function nextEvidenceQuestion(issue, intent) {
+  const text = [
+    issue.ticket?.summary,
+    issue.ticket?.description_markdown,
+    issue.ticket?.environment,
+    ...(issue.comments || []).map((item) => item.body_markdown),
+  ].filter(Boolean).join("\n");
+  const urls = safeHttpLocators(text);
+  const task = /\btask\s*(?:id)?\s*[:：#]?\s*([0-9]{1,12})\b/i.exec(text)?.[1];
+  const build = /\bbuild\s*#?\s*([0-9]{1,12})\b/i.exec(text)?.[1];
+  const time = /\b20[0-9]{2}[-/][01]?[0-9][-/][0-3]?[0-9][ T][0-2]?[0-9]:[0-5][0-9](?::[0-5][0-9])?\b/.exec(text)?.[0];
+  const locators = [
+    ...urls.slice(0, 2),
+    task ? `task:${task}` : null,
+    build ? `build:${build}` : null,
+    time ? `time:${time}` : null,
+  ].filter(Boolean).slice(0, 4);
+  const locator = locators.length ? locators.join(", ") : `jira:${issue.source.issue_key}`;
+  const fulfillment = intent.work_intent === "request_fulfillment";
+  const definitions = [
+    {
+      id: "cicd",
+      priority: 2,
+      matches: /jenkins|pipeline|流水线|cicd|ci\/cd|构建/i,
+      source: fulfillment ? "requester + SRE CI/CD control plane" : "Jenkins or CI/CD control plane",
+      question: fulfillment
+        ? "Confirm the exact application/repository, framework, environment, desired delivery result, and authoritative onboarding control point before building the implementation plan."
+        : "Resolve the exact Job, Build or Task, then inspect its parameters, resolved SCM ref/Commit, first failing stage, and first substantive error.",
+      validation: fulfillment
+        ? "The target, current state, supported procedure, requested values, and acceptance result are all uniquely identified."
+        : "One first divergence is tied to the same Job/Build/Task and SCM identity as the Jira observation.",
+      stop: "Stop if the run does not resolve to the requested application/environment, inputs differ from the comparison sample, or access would expose credentials.",
+    },
+    {
+      id: "ingress",
+      priority: 3,
+      matches: /ingress|域名|\bhost\b|\bpath\b|路由|静态资源|f5/i,
+      source: fulfillment ? "requester + SRE ingress source of truth" : "DNS/edge/Ingress/runtime route",
+      question: fulfillment
+        ? "Confirm the exact Host, Path set, environment, desired response or backend, unaffected routes, and authoritative configuration source."
+        : "Using the exact Host and Path, compare DNS or edge routing, Ingress match/rewrite, Service/Endpoint, and application response to find the first boundary that differs.",
+      validation: fulfillment
+        ? "The requested Host/Path target and exclusions map to one owned configuration source and one observable acceptance result."
+        : "The first mismatching boundary and its owner are supported by current evidence; earlier hypotheses are updated when contradicted.",
+      stop: "Stop when Host/Path is not unique, the request belongs to another team or edge layer, or the next check would cross an unapproved environment boundary.",
+    },
+    {
+      id: "apim",
+      priority: 5,
+      matches: /apim|api gateway|swagger|cors|限流|rate limit/i,
+      source: fulfillment ? "requester + APIM control plane" : "client/APIM/upstream evidence",
+      question: fulfillment
+        ? "Confirm the exact API or operation, environment, requested policy values, counting or Origin semantics, and acceptance behavior before selecting a policy scope."
+        : "Correlate one safe request by API/operation, environment and time, then compare the path or response at the client, APIM receive/forward boundary, and upstream.",
+      validation: fulfillment
+        ? "One API/operation and policy scope has explicit values, negative checks, and a rollback boundary."
+        : "The first boundary that changes the request or response is identified without treating an APIM keyword as root-cause proof.",
+      stop: "Stop if the API/operation, environment, or time anchor is missing, or if continuing would require a subscription key, Authorization value, Cookie, or signature.",
+    },
+    {
+      id: "configuration",
+      priority: 4,
+      matches: /vault|configmap|环境变量|变量|annotation|helm|values|默认配置|资源配置|规格/i,
+      source: "configuration source, render, and workload",
+      question: "Trace the named non-secret key or setting from the authoritative source through merge/render output to the target workload and application read point; identify the first missing or changed representation.",
+      validation: "The same application, environment, release identity, and key name are compared at every boundary without reading or exposing the value.",
+      stop: "Stop if the target release is not unique, a step requires secret values or an unauthorized Pod action, or source and runtime identities cannot be correlated.",
+    },
+    {
+      id: "access",
+      priority: 4,
+      matches: /权限|request type|\baccess\b|授权/i,
+      source: fulfillment ? "requester + access-control current state" : "access-control current state",
+      question: fulfillment
+        ? "Confirm the exact project/resource, requested operation, current principal, smallest controlling role or permission, approval, and expiry or rollback condition."
+        : "Confirm the exact denied operation and controlling permission boundary before deciding whether the cause is identity, product access, project role, or policy.",
+      validation: "The requested operation succeeds only in the approved scope, while an unapproved adjacent operation remains denied.",
+      stop: "Stop if the target or principal is ambiguous, approval is missing, or only a broader administrative role would satisfy the request.",
+    },
+  ];
+  const preciseCicdLocator = /jenkins|pipeline\/history|\btask\s*(?:id)?\s*[:：#]?\s*[0-9]+|\bbuild\s*#?\s*[0-9]+/i.test(text);
+  const candidates = definitions.filter((item) => item.matches.test(text));
+  const selected = (preciseCicdLocator ? candidates.find((item) => item.id === "cicd") : null)
+    || candidates.sort((left, right) => right.priority - left.priority)[0]
+    || {
+    source: fulfillment ? "requester + responsible SRE control plane" : "current responsible evidence source",
+    question: fulfillment
+      ? "Confirm the exact target, environment, requested value, current state, acceptance result, and responsible control point."
+      : "Use the safest available locator to inspect one current fact that can support, contradict, or narrow the leading hypothesis.",
+    validation: fulfillment
+      ? "The implementation path, validation, and rollback no longer depend on an invented target or value."
+      : "The observation changes one explicit hypothesis or evidence gap.",
+    stop: "Stop when the target cannot be uniquely resolved or the next action requires secrets, writes, or an unapproved scope.",
+  };
+  return {
+    source: selected.source,
+    locator,
+    question: selected.question,
+    expected_effect: fulfillment ? "narrows_plan" : "supports_or_contradicts_hypothesis",
+    validation: selected.validation,
+    stop_condition: selected.stop,
+  };
+}
+
+function renderNextEvidenceQuestion(question) {
+  return `- Source: ${question.source}\n- Locator: ${question.locator}\n- Question: ${question.question}\n- Expected effect: ${question.expected_effect}\n- Validation: ${question.validation}\n- Stop condition: ${question.stop_condition}`;
+}
+
 function requesterInformationDraft(intent) {
   const requests = intent.pending_confirmations.filter((item) => item.kind === "requester_input");
   if (!requests.length) return "";
@@ -391,11 +545,12 @@ function requesterInformationDraft(intent) {
 function requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
   const evidence = reportEvidence(issue, matches, providerEvidence);
   const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
+  const nextQuestion = nextEvidenceQuestion(issue, intent);
   const requesterDraft = requesterInformationDraft(intent);
   const userSide = requesterDraft
     ? "\n\n## User-side coordination\n\n- Reply with the requester-owned inputs listed above.\n- Internal current-state checks remain with SRE."
     : "";
-  return `# L0.5 request fulfillment: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Analysis mode: read-only evidence collection and human handoff.\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}; no production or Jira write was performed.\n- Completion reply: template only, not ready to paste.\n\n## Request target and scope\n\n- Summary: ${issue.ticket.summary}\n- Environment: ${issue.ticket.environment || "not confirmed"}\n- Components: ${issue.ticket.components.join(", ") || "not confirmed"}\n- The exact desired state and exclusions must come from current Jira facts or confirmed requester input; historical precedent cannot supply production values.\n\n## Current evidence and pending confirmations\n\n${renderPendingConfirmations(intent)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}${requesterDraft}\n\n## SRE handling runbook\n\n1. Confirm the exact target resource, environment, product/version, control point, requested values, exclusions, approval, change window, and rollback owner.\n2. Capture the current effective configuration and a recoverable pre-change snapshot.\n3. Resolve every requester input and evidence gap that changes the implementation path; use only steps supported by current configuration, authoritative documentation, code, or a reviewed precedent.\n4. Apply only the approved target-scoped change through the responsible SRE control plane. This report does not authorize or perform that action.\n5. Verify the requested behavior, unaffected adjacent scope, monitoring signals, and rollback readiness.\n6. Record the actual configuration difference, change record, execution time, validation result, and requester acceptance when required.${userSide}\n\n## Risks, approval, and rollback\n\n- Any production-affecting action requires explicit target resolution, human review, and the applicable approval.\n- Stop when the current product/control point, affected scope, or rollback path cannot be confirmed.\n- Roll back from the captured snapshot when validation fails or an excluded scope changes unexpectedly, then re-run the pre-change checks.\n\n## Completion criteria and evidence\n\n- Target state is observable in the responsible control plane.\n- Positive and negative validation results are recorded.\n- Adjacent scope remains healthy.\n- Change/approval reference, actual values changed, execution time, and rollback status are retained.\n- The requester has completed or accepted any explicitly assigned user-side step.\n\n## Post-completion Jira reply draft (template, not ready to paste)\n\n您好，您申请的 <需求目标> 已由 SRE 完成处理。\n\n【已完成】\n- <actual target and change, supported by execution evidence>\n\n【验证结果】\n- <actual validation and result>\n\n【用户侧后续】\n- <retain only when requester action or acceptance is still required>\n\n【注意事项】\n- <retain only material limitations or follow-up>\n\nDo not convert this template to ready-to-paste until execution and validation evidence is available.\n\n## Handling trail and references\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; the SRE prechecks above are still required before implementation."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n`;
+  return `# L0.5 request fulfillment: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Analysis mode: read-only evidence collection and human handoff.\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}; no production or Jira write was performed.\n- Completion reply: template only, not ready to paste.\n\n## Request target and scope\n\n- Summary: ${issue.ticket.summary}\n- Environment: ${issue.ticket.environment || "not confirmed"}\n- Components: ${issue.ticket.components.join(", ") || "not confirmed"}\n- The exact desired state and exclusions must come from current Jira facts or confirmed requester input; historical precedent cannot supply production values.\n\n## Current evidence and pending confirmations\n\n${renderPendingConfirmations(intent)}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}${requesterDraft}\n\n## SRE handling runbook\n\n1. Confirm the exact target resource, environment, product/version, control point, requested values, exclusions, approval, change window, and rollback owner.\n2. Capture the current effective configuration and a recoverable pre-change snapshot.\n3. Resolve every requester input and evidence gap that changes the implementation path; use only steps supported by current configuration, authoritative documentation, code, or a reviewed precedent.\n4. Apply only the approved target-scoped change through the responsible SRE control plane. This report does not authorize or perform that action.\n5. Verify the requested behavior, unaffected adjacent scope, monitoring signals, and rollback readiness.\n6. Record the actual configuration difference, change record, execution time, validation result, and requester acceptance when required.${userSide}\n\n## Risks, approval, and rollback\n\n- Any production-affecting action requires explicit target resolution, human review, and the applicable approval.\n- Stop when the current product/control point, affected scope, or rollback path cannot be confirmed.\n- Roll back from the captured snapshot when validation fails or an excluded scope changes unexpectedly, then re-run the pre-change checks.\n\n## Completion criteria and evidence\n\n- Target state is observable in the responsible control plane.\n- Positive and negative validation results are recorded.\n- Adjacent scope remains healthy.\n- Change/approval reference, actual values changed, execution time, and rollback status are retained.\n- The requester has completed or accepted any explicitly assigned user-side step.\n\n## Post-completion Jira reply draft (template, not ready to paste)\n\n您好，您申请的 <需求目标> 已由 SRE 完成处理。\n\n【已完成】\n- <actual target and change, supported by execution evidence>\n\n【验证结果】\n- <actual validation and result>\n\n【用户侧后续】\n- <retain only when requester action or acceptance is still required>\n\n【注意事项】\n- <retain only material limitations or follow-up>\n\nDo not convert this template to ready-to-paste until execution and validation evidence is available.\n\n## Handling trail and references\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; the SRE prechecks above are still required before implementation."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n`;
 }
 
 function unclearReportFor(issue, injection, intent) {
@@ -408,10 +563,11 @@ function troubleshootingReportFor(issue, matches, injection, vaultContract, inte
   const evidence = reportEvidence(issue, matches, providerEvidence);
   const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
   const structuredHypotheses = hypotheses(issue, matches, providerEvidence);
+  const nextQuestion = nextEvidenceQuestion(issue, intent);
   const mixedSection = intent.work_intent === "mixed"
     ? `\n\n## Request fulfillment subtask\n\n**blocked** — keep the requested implementation separate from the investigation. Do not turn an unconfirmed causal hypothesis into an SRE change step.\n\n${renderPendingConfirmations(intent)}${requesterInformationDraft(intent)}`
     : "";
-  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Timeline\n\n${evidence.timeline}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}\n\n## Investigation trail\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.${mixedSection}\n\n## Recommended change\n\nCollect the narrow current log, configuration, code, or runtime evidence needed to test the leading hypothesis. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nReproduce safely, inspect the relevant current configuration/code/runtime evidence, apply a human-reviewed change, and verify regression behavior in the affected environment.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
+  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Timeline\n\n${evidence.timeline}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}\n\n## Investigation trail\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.${mixedSection}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Recommended change\n\nNo change is recommended until the bounded evidence question above identifies the first causal or configuration boundary. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nUse the same target identity and locator to verify the observed boundary before and after any approved change, then check one negative and one adjacent scope.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
 }
 
 function reportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
@@ -420,7 +576,19 @@ function reportFor(issue, matches, injection, vaultContract, intent, providerEvi
   return troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, publishResult);
 }
 
-export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode = "metadata-only", caseDir, keepTemp = false, publishToKb = false, providerDir}) {
+export async function runCase({
+  issue,
+  baseUrl,
+  kbRoot,
+  fixture,
+  attachmentMode = "metadata-only",
+  caseDir,
+  keepTemp = false,
+  publishToKb = false,
+  providerDir,
+  evidencePlan,
+  authorizeLokiProfileUpdate = false,
+}) {
   if (!kbRoot) return {status: "blocked", reason: "knowledge vault is not configured; run l05_setup.py doctor", diagnosis_allowed: false};
   let identity;
   try { identity = parseIssueIdentity(issue, baseUrl); }
@@ -486,6 +654,22 @@ export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode =
     const matches = findKbMatches(kbRoot, normalized, normalized.source.issue_updated_at);
     const seedDetails = extractRetrievalSeedDetails(normalized);
     const providerEvidence = await collectOptionalEvidence({kbRoot, issue: normalized, retrievalSeedDetails: seedDetails, providerDir});
+    if (evidencePlan) {
+      stage = "planned_provider_evidence";
+      const planned = await executeEvidencePlan({
+        kbRoot,
+        issue: normalized,
+        evidencePlan,
+        providerDir,
+        authorizeProfileUpdate: authorizeLokiProfileUpdate,
+      });
+      providerEvidence.responses.push(...planned.responses);
+      providerEvidence.gaps.push(...planned.gaps);
+      providerEvidence.deferred_providers = (providerEvidence.deferred_providers || []).filter((provider) => provider !== "loki");
+      providerEvidence.inspection_steps = planned.inspection_steps;
+      providerEvidence.evidence_plan_status = planned.status;
+      providerEvidence.loki_budget = planned.budget;
+    }
     let report = reportFor(normalized, matches, injection, vaultContract, intentAssessment, providerEvidence);
     let publishResult = null;
     if (publishToKb) {
@@ -511,6 +695,7 @@ export async function runCase({issue, baseUrl, kbRoot, fixture, attachmentMode =
       retrieval_seed_details: seedDetails,
       optional_provider_evidence: providerEvidence,
       inspection_trace: buildInspectionTrace(normalized, matches, providerEvidence),
+      next_evidence_question: nextEvidenceQuestion(normalized, intentAssessment),
       prompt_injection_detected: injection,
       hypotheses: intentAssessment.work_intent === "request_fulfillment" ? [] : hypotheses(normalized, matches, providerEvidence),
       publish_result: publishResult,
@@ -556,6 +741,8 @@ function parseArgs(argv) {
     else if (key === "--fixture") args.fixture = path.resolve(argv[++index]);
     else if (key === "--attachment-mode") args.attachmentMode = argv[++index];
     else if (key === "--case-dir") args.caseDir = path.resolve(argv[++index]);
+    else if (key === "--evidence-plan") args.evidencePlanFile = path.resolve(argv[++index]);
+    else if (key === "--authorize-loki-profile-update") args.authorizeLokiProfileUpdate = true;
     else if (key === "--keep-temp") args.keepTemp = true;
     else if (key === "--publish-to-kb") args.publishToKb = true;
     else if (key === "--help") args.help = true;
@@ -566,8 +753,13 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.help || !args.issue) { console.log("Usage: run_l05_case.mjs <issue-key-or-url> [--fixture json] [--kb-root path] [--attachment-mode mode] [--keep-temp] [--publish-to-kb]"); return args.help ? 0 : 2; }
+  if (args.help || !args.issue) { console.log("Usage: run_l05_case.mjs <issue-key-or-url> [--fixture json] [--kb-root path] [--attachment-mode mode] [--evidence-plan json] [--authorize-loki-profile-update] [--keep-temp] [--publish-to-kb]"); return args.help ? 0 : 2; }
   if (!args.kbRoot) { console.log(JSON.stringify({status: "blocked", reason: "L05_OBSIDIAN_VAULT is not configured; run l05_setup.py doctor", diagnosis_allowed: false}, null, 2)); return 2; }
+  if (args.evidencePlanFile) {
+    const metadata = fs.lstatSync(args.evidencePlanFile);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024 * 1024) throw new Error("Evidence Plan must be a regular JSON file no larger than 1 MiB");
+    args.evidencePlan = JSON.parse(fs.readFileSync(args.evidencePlanFile, "utf8"));
+  }
   const result = await runCase(args);
   if (result.report) console.log(result.report);
   else console.log(JSON.stringify(result, null, 2));

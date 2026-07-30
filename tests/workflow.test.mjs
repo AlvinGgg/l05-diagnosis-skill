@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {spawnSync} from "node:child_process";
 import test from "node:test";
-import {assessIntent, classifyJiraCollectionFailure, compareFreshness, detectPromptInjection, findKbMatches, parseIssueIdentity, retrievalSeeds, runCase} from "../scripts/run_l05_case.mjs";
+import {assessIntent, classifyJiraCollectionFailure, compareFreshness, detectPromptInjection, findKbMatches, nextEvidenceQuestion, parseIssueIdentity, retrievalSeeds, runCase} from "../scripts/run_l05_case.mjs";
 
 const FIXTURE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures/jira-fixture.json");
 
@@ -106,6 +106,50 @@ test("material requester gaps produce questions while SRE current-state checks s
   assert.ok(latestOverride.counter_signals.some((item) => item.signal.includes("failure") || item.signal.includes("investigation")));
 });
 
+test("Chinese fulfillment, regression, and historical-action signals preserve route boundaries", () => {
+  for (const description of [
+    "新搭建的项目如何配置 CI/CD 2.5",
+    "Request Type 显示无权限，如何开放我的权限进行配置",
+    "需要帮忙屏蔽已确认暴露的 Prometheus 路径",
+    "如何为目标 API 进行限流配置",
+    "如何在 Ingress 这一层限制 PUT 和 DELETE",
+  ]) {
+    const assessment = assessIntent(intentIssue({summary: "SRE support request", description}));
+    assert.equal(assessment.work_intent, "request_fulfillment", description);
+  }
+
+  for (const description of [
+    "发布配置没有生效，日志里还是默认配置",
+    "Vault 已配置，但应用读取不到 SERVICE_API_URL",
+    "已经申请新域名并完成绑定，但当前访问返回 404",
+    "Ingress 已指向目标服务，但生产静态资源无法访问",
+    "QA 申请了 Ingress 指向静态资源，QA 正常但生产资源无法访问",
+    "查询失败，请帮忙看看是否是 APIM 做了什么限制",
+  ]) {
+    const assessment = assessIntent(intentIssue({summary: "Unexpected behavior", description}));
+    assert.equal(assessment.work_intent, "problem_investigation", description);
+  }
+
+  const mixed = assessIntent(intentIssue({
+    summary: "QA regression and production migration",
+    description: "QA 配置之前生效但现在又失效，请排查；验证恢复后需要将同样配置迁移到生产。",
+  }));
+  assert.equal(mixed.work_intent, "mixed");
+
+  const requestVerb = assessIntent(intentIssue({
+    summary: "Environment variable missing",
+    description: "应用请求创建接口时读取不到环境变量。",
+  }));
+  assert.equal(requestVerb.work_intent, "problem_investigation");
+  assert.equal(requestVerb.counter_signals.some((item) => item.signal === "explicit_fulfillment_request"), false);
+
+  const implementationConstraint = assessIntent(intentIssue({
+    summary: "Restrict insecure HTTP methods",
+    description: "需要在 Ingress 限制 PUT/DELETE。我们目前无法修改源码。",
+  }));
+  assert.equal(implementationConstraint.work_intent, "request_fulfillment");
+});
+
 test("mapped Jira fields remain auxiliary intent signals", () => {
   const assessment = assessIntent(
     intentIssue({
@@ -118,6 +162,60 @@ test("mapped Jira fields remain auxiliary intent signals", () => {
   );
   assert.equal(assessment.work_intent, "unclear");
   assert.equal(assessment.confidence, "low");
+});
+
+test("next evidence question uses existing locators and domain-specific stop conditions", () => {
+  const pipelineIssue = intentIssue({
+    summary: "CICD build failed",
+    description: "Jenkins https://jenkins.example.test/job/demo/3/ build 3 failed",
+  });
+  pipelineIssue.source = {issue_key: "DEMO-3"};
+  const pipeline = nextEvidenceQuestion(pipelineIssue, {work_intent: "problem_investigation"});
+  assert.match(pipeline.locator, /\/job\/demo\/3\//);
+  assert.match(pipeline.question, /first failing stage/);
+  assert.match(pipeline.stop_condition, /credentials/);
+
+  const ingressIssue = intentIssue({
+    summary: "Ingress route failed",
+    description: "https://app.example.test/api returns 404",
+  });
+  ingressIssue.source = {issue_key: "DEMO-4"};
+  const ingress = nextEvidenceQuestion(ingressIssue, {work_intent: "problem_investigation"});
+  assert.match(ingress.question, /DNS or edge routing/);
+  assert.match(ingress.stop_condition, /another team/);
+
+  const fulfillmentIssue = intentIssue({
+    summary: "APIM rate limit",
+    description: "请为目标 API 配置限流",
+  });
+  fulfillmentIssue.source = {issue_key: "DEMO-5"};
+  const fulfillment = nextEvidenceQuestion(fulfillmentIssue, {work_intent: "request_fulfillment"});
+  assert.match(fulfillment.question, /API or operation/);
+  assert.equal(fulfillment.expected_effect, "narrows_plan");
+
+  const apimPathIssue = intentIssue({
+    summary: "APIM path parameter truncated",
+    description: "https://api.example.test/items/NA2.0PLUS 到后端后参数不全",
+  });
+  apimPathIssue.source = {issue_key: "DEMO-6"};
+  const apimPath = nextEvidenceQuestion(apimPathIssue, {work_intent: "problem_investigation"});
+  assert.match(apimPath.question, /APIM receive\/forward boundary/);
+
+  const configurationIssue = intentIssue({
+    summary: "Resource configuration not effective",
+    description: "发布日志仍然显示默认配置",
+  });
+  configurationIssue.source = {issue_key: "DEMO-7"};
+  const configuration = nextEvidenceQuestion(configurationIssue, {work_intent: "problem_investigation"});
+  assert.match(configuration.question, /authoritative source through merge\/render output/);
+
+  const linkedJiraIssue = intentIssue({
+    summary: "Ingress 404",
+    description: "参考 https://jira.example.test/servicedesk/customer/portal/3/DEMO-1，新地址 https://app.example.test/api 返回 404",
+  });
+  linkedJiraIssue.source = {issue_key: "DEMO-8"};
+  const linkedJira = nextEvidenceQuestion(linkedJiraIssue, {work_intent: "problem_investigation"});
+  assert.doesNotMatch(linkedJira.locator, /jira\.example\.test/);
 });
 
 test("retrieval is source-first, quality-aware, and stable", () => {
@@ -286,6 +384,106 @@ test("offline case renders current optional Provider evidence with provenance ow
   assert.match(result.report, /Optional Provider\(s\): fixture.*status: `completed`/);
   assert.match(result.report, /fixture\/ci\.build\.resolve: Current build resolved/);
   assert.equal(result.provider_evidence.responses[0].provider_id, "fixture");
+});
+
+test("explicit Evidence Plan runs Loki and exposes every bounded step in the handling trail", async () => {
+  const kbRoot = testKb();
+  const profileFile = path.join(kbRoot, ".l05-profile.json");
+  const profile = JSON.parse(fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/vault-template/.l05-profile.json"), "utf8"));
+  profile.optional_evidence_providers = [{
+    provider_id: "loki",
+    enabled: true,
+    capabilities: ["loki.gateway.health", "loki.stream.selector.resolve", "loki.index.stats", "loki.logs.query_excerpt"],
+    match: {problem_types: ["gateway.*"], match_mode: "any"},
+    config: {
+      gateways: [{
+        cluster_ref: "example-qa-a",
+        gateway_url: "https://loki.example.test",
+      }],
+    },
+  }, {
+    provider_id: "kubectl",
+    enabled: true,
+    capabilities: ["k8s.context.health"],
+    match: {problem_types: ["gateway.*"], match_mode: "any"},
+    config: {routes: [{
+      id: "example-qa-a",
+      match: {keywords: ["example-qa-a", "qa-a"], match_mode: "any"},
+      cluster_alias: "example-qa-a",
+    }]},
+  }];
+  fs.writeFileSync(profileFile, JSON.stringify(profile));
+  const providerDir = fs.mkdtempSync(path.join(os.tmpdir(), "l05-case-loki-provider-"));
+  const providerScript = path.join(providerDir, "loki-provider.mjs");
+  fs.writeFileSync(providerScript, `
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  const provenance = {access_mode:"read-only",cluster_alias:"example-qa-a",gateway_source:"profile",collected_at:new Date().toISOString()};
+  const records = [
+    {capability:"loki.gateway.health",evidence_type:"loki_gateway_health",summary:"Gateway ready",confidence:"confirmed",data:{ready:true},provenance},
+    ...request.context.evidence_plan.targets.flatMap((target) => [
+      {capability:"loki.stream.selector.resolve",evidence_type:"loki_stream_selector_resolution",summary:"Application selector resolved",confidence:"confirmed",data:{target_id:target.target_id,candidate_labels:["application"],attempts:[{label:"application",outcome:"selected"}],selected_label:"application",cache_scope:"provider_process_memory"},provenance},
+      {capability:"loki.index.stats",evidence_type:"loki_index_stats",summary:"Small selector estimate",confidence:"confirmed",data:{target_id:target.target_id,bytes:1024},provenance},
+      {capability:"loki.logs.query_excerpt",evidence_type:"loki_log_excerpt",summary:"One bounded match",confidence:"confirmed",data:{target_id:target.target_id,entry_count:1,entries:[{message:"[matched-token]"}],stats:{totalBytesProcessed:1024}},provenance},
+    ]),
+  ].filter((record) => request.capabilities.includes(record.capability));
+  process.stdout.write(JSON.stringify({schema_version:"l05-provider-response/v1",provider_id:"loki",status:"ok",evidence_records:records,candidates:[],gaps:[]}));
+});
+`);
+  fs.writeFileSync(path.join(providerDir, "loki.json"), JSON.stringify({
+    schema_version: "l05-provider-manifest/v1",
+    provider_id: "loki",
+    display_name: "Fixture Loki",
+    command: [process.execPath, providerScript],
+    capabilities: ["loki.gateway.health", "loki.stream.selector.resolve", "loki.index.stats", "loki.logs.query_excerpt"],
+    request_schema: "l05-provider-request/v1",
+    response_schema: "l05-provider-response/v1",
+  }));
+  const evidencePlan = {
+    schema_version: "l05-evidence-plan/v1",
+    case_id: "DEMO-3",
+    evidence_question: "Did request req-123456 reach APIM?",
+    cluster_alias: "example-qa-a",
+    time_anchor: {
+      start: "2026-07-28T02:00:00Z",
+      end: "2026-07-28T02:02:00Z",
+      source: "jira_event_timestamp",
+    },
+    targets: [{
+      target_id: "apim",
+      role: "primary-application",
+      application: "apim",
+      filters: {exact_terms: ["req-123456"], fuzzy_terms: [], error_only: false},
+      limit: 5,
+      triggered_by: ["jira:request_id"],
+    }],
+    budget: {max_log_queries: 2, max_tenants: 2, max_scan_bytes: 1048576, max_entries: 10},
+  };
+  const result = await runCase({
+    issue: "DEMO-3",
+    baseUrl: "https://jira.example.test",
+    kbRoot,
+    fixture: FIXTURE,
+    providerDir,
+    evidencePlan,
+    keepTemp: true,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(result.provider_evidence.evidence_plan_status, "ok");
+  assert.deepEqual(result.provider_evidence.inspection_steps.map((item) => item.capability), [
+    "loki.gateway.health",
+    "loki.stream.selector.resolve",
+    "loki.index.stats",
+    "loki.logs.query_excerpt",
+  ]);
+  for (const capability of ["loki.gateway.health", "loki.stream.selector.resolve", "loki.index.stats", "loki.logs.query_excerpt"]) {
+    assert.ok(result.report.includes(`Planned Provider step: ${capability}`));
+  }
+  const summary = JSON.parse(fs.readFileSync(path.join(result.case_dir, "case-summary.json"), "utf8"));
+  assert.equal(summary.optional_provider_evidence.loki_budget.used.log_queries, 1);
+  assert.equal(summary.inspection_trace.filter((item) => item.source.startsWith("Planned Provider step:")).length, 4);
 });
 
 test("CLI loads Jira and Vault settings from the private configuration file", () => {

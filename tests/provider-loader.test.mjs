@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {collectOptionalEvidence, discoverProviderManifests, inferProblemType, providerEntryMatches, validateProviderManifest} from "../scripts/provider-loader.mjs";
+import {collectOptionalEvidence, discoverProviderManifests, inferProblemType, invokeProvider, providerEntryMatches, validateProviderManifest} from "../scripts/provider-loader.mjs";
 
 function issue(summary = "Jenkins pipeline build failed") {
   return {
@@ -91,3 +91,53 @@ test("missing matched provider becomes an evidence gap", async () => {
   assert.ok(result.gaps.includes("provider_not_installed:missing"));
 });
 
+test("parseable blocked responses survive a provider non-zero exit", async () => {
+  const directory = providerDirectory(`
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({
+    schema_version: "l05-provider-response/v1",
+    provider_id: "fixture",
+    status: "blocked",
+    evidence_records: [],
+    candidates: [],
+    gaps: ["fixture_blocked"]
+  }));
+  process.exitCode = 2;
+});
+`);
+  const manifest = discoverProviderManifests(directory).providers.get("fixture");
+  const response = await invokeProvider(manifest, {
+    schema_version: "l05-provider-request/v1",
+    request_id: "fixture",
+    provider_id: "fixture",
+    capabilities: ["ci.build.resolve"],
+    issue: {},
+    context: {},
+    config: {},
+  });
+  assert.equal(response.status, "blocked");
+  assert.deepEqual(response.gaps, ["fixture_blocked"]);
+});
+
+test("generic optional evidence defers Loki until an Evidence Plan exists", async () => {
+  const kbRoot = vault({
+    optional_evidence_providers: [
+      {
+        provider_id: "loki",
+        enabled: true,
+        capabilities: ["loki.logs.query_excerpt"],
+        match: {problem_types: ["cicd.*"], match_mode: "any"},
+        config: {gateways: []},
+      },
+    ],
+  });
+  const result = await collectOptionalEvidence({
+    kbRoot,
+    issue: issue(),
+    providerDir: fs.mkdtempSync(path.join(os.tmpdir(), "l05-empty-providers-")),
+  });
+  assert.deepEqual(result.responses, []);
+  assert.deepEqual(result.deferred_providers, ["loki"]);
+  assert.deepEqual(result.gaps, []);
+});
