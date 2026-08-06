@@ -1,3 +1,5 @@
+import {extractRequestSummary} from "./request-summary.mjs";
+
 const TROUBLESHOOTING_SIGNALS = [
   {
     signal: "explicit_investigation_request",
@@ -7,7 +9,7 @@ const TROUBLESHOOTING_SIGNALS = [
   {
     signal: "observed_failure_or_unexpected_behavior",
     strength: 1,
-    pattern: /失败|报错|异常|无法|不可用|中断|无响应|错误码|不生效|未生效|失效|读取不到|读不到|仍(?:然)?(?:使用|是|为)?默认|还是默认|再次.{0,12}(?:失败|失效)|又.{0,12}(?:失败|失效)|请求.{0,16}超时|超时(?:错误|中断|断开|失败)|为什么|根因|\b[45]\d{2}\b|\b(?:failed|failure|error|exception|unavailable|cannot|can't|unable|broken|timed?\s*out|not working|not effective|stopped working|regressed|root cause|gateway timeout|request timeout|why)\b/i,
+    pattern: /失败|报错|异常|无法|不可用|中断|无响应|错误码|不生效|未生效|失效|读取不到|读不到|遇到.{0,12}问题|仍(?:然)?(?:使用|是|为)?默认|还是默认|再次.{0,12}(?:失败|失效)|又.{0,12}(?:失败|失效)|请求.{0,16}超时|超时(?:错误|中断|断开|失败)|为什么|根因|\b[45]\d{2}\b|\b(?:failed|failure|error|exception|unavailable|cannot|can't|unable|broken|timed?\s*out|not working|not effective|stopped working|regressed|root cause|gateway timeout|request timeout|cors|preflight|access control|blocked by|does(?: not|n't) pass|why)\b/i,
   },
 ];
 
@@ -188,7 +190,7 @@ function hasContentSignal(items) {
   return items.some((item) => item.content_signal);
 }
 
-function chooseIntent(issue, records, signals) {
+function chooseIntent(issue, records, signals, requestSummary) {
   const troubleshootingScore = totalScore(signals.problem_investigation);
   const fulfillmentScore = totalScore(signals.request_fulfillment);
   const troubleshootingContent = hasContentSignal(signals.problem_investigation);
@@ -215,6 +217,7 @@ function chooseIntent(issue, records, signals) {
   if (fulfillmentContent) {
     return {work_intent: "request_fulfillment", confidence: troubleshootingScore ? "medium" : fulfillmentScore >= 4 ? "high" : "medium"};
   }
+  if (requestSummary.has_concrete_problem) return {work_intent: "problem_investigation", confidence: "medium"};
   return {work_intent: "unclear", confidence: "low"};
 }
 
@@ -265,9 +268,13 @@ function pendingConfirmations(issue, workIntent, records) {
   return pending;
 }
 
-export function assessIntent(issue, fieldMappings = {}) {
+export function assessIntent(issue, jiraConfig = {}) {
+  const fieldMappings = jiraConfig?.field_mappings && typeof jiraConfig.field_mappings === "object"
+    ? jiraConfig.field_mappings
+    : jiraConfig;
   const {records, signals} = classifySignals(issue, fieldMappings);
-  const decision = chooseIntent(issue, records, signals);
+  const requestSummary = extractRequestSummary(issue, jiraConfig);
+  const decision = chooseIntent(issue, records, signals, requestSummary);
   const pending = pendingConfirmations(issue, decision.work_intent, records);
   const requesterInput = pending.some((item) => item.kind === "requester_input");
   const supportingSignals = decision.work_intent === "mixed"
@@ -295,5 +302,6 @@ export function assessIntent(issue, fieldMappings = {}) {
     counter_signals: counterSignals.map(({score, content_signal, ...item}) => item),
     pending_confirmations: pending,
     missing_inputs: pending.map((item) => item.item),
+    request_summary: requestSummary,
   };
 }

@@ -3,7 +3,10 @@
 ## Intent gate
 
 After the current Jira Bundle validates, read `intent-routing.md` and create the
-structured `intent_assessment` before reading the Vault or invoking a Provider.
+structured `intent_assessment` and description-first `request_summary` before
+reading the Vault or invoking a Provider. The summary carries the requester
+ask, symptom/goal, exact safe target, comparison evidence, and description
+provenance through retrieval and the next evidence question.
 
 - `problem_investigation` enters causal diagnosis.
 - `request_fulfillment` enters evidence-backed implementation planning.
@@ -40,12 +43,24 @@ secret-like values, full IP addresses, or sensitive URL queries as seeds.
 - For fulfillment, retrieve evidence that proves the procedure, parameters,
   limitations, validation, rollback, and current control point.
 
-Read `<kb>/AGENTS.md`, then `index.md`. Follow the Vault's own mapping and search in this order when those logical paths exist:
+Read `<kb>/AGENTS.md`, then `index.md`. Resolve explicit `wiki/sources/` links
+from the index even when a legacy Profile does not list the top-level Source
+folder. When an approved raw entry guide is configured, use it only to identify
+an exact self-service or automated route; do not treat it as a historical root
+cause. Follow the Vault's own mapping and search in this order when those
+logical paths exist:
 
-1. `wiki/sources/jira`;
-2. `wiki/sources/tickets` and `wiki/sources/documents`;
-3. relevant `wiki/howtos`, `wiki/systems`, `wiki/topics`, and `wiki/concepts`;
-4. `raw/tickets` only as lower-layer source evidence.
+1. exact approved self-service entry in an index-linked Source page or
+   `raw/files` entry guide, when the current scenario is specifically matched;
+2. `wiki/sources/jira`;
+3. `wiki/sources/tickets` and `wiki/sources/documents`;
+4. relevant `wiki/howtos`, `wiki/systems`, `wiki/topics`, and `wiki/concepts`;
+5. `raw/tickets` only as lower-layer source evidence.
+
+An exact self-service match wins over generic historical precedent and generic
+Provider routing. Return the entry, required inputs, verification, and failure
+fallback to the requester, then defer manual investigation. A no-match or an
+entry failure returns to the normal evidence order.
 
 Every result carries `source_type`, `quality_level`, `freshness`,
 `match_reason`, and `evidence_path`. Quality is loaded only from a report that
@@ -57,14 +72,15 @@ stronger match evidence.
 
 ## Evidence order
 
-1. Current Jira normalized facts.
+1. Current Jira normalized facts and description-first request summary.
 2. Structured intent assessment with supporting and counter-signals.
-3. Freshness- and quality-labelled KB evidence.
-4. Targeted attachments and links that test a hypothesis or implementation step.
-5. Exact isolated Repository Snapshot or explicitly enabled local code/config evidence.
-6. Current official vendor documentation when internal evidence does not define
+3. Exact approved self-service route, when one is specifically matched.
+4. Freshness- and quality-labelled KB evidence.
+5. Targeted attachments and links that test a hypothesis or implementation step.
+6. Exact isolated Repository Snapshot or explicitly enabled local code/config evidence.
+7. Current official vendor documentation when internal evidence does not define
    the product behavior or supported procedure.
-7. Runtime/browser/cluster evidence only when needed and authorized.
+8. Runtime/browser/cluster evidence only when needed and authorized.
 
 Separate fact, inference, and unverified hypothesis. Optional evidence failure
 creates a gap; core Jira/schema failure creates a blocked result.
@@ -102,6 +118,10 @@ Classify the request before drafting:
 - For consultation, a reply may be generated when authoritative documentation
   or current code supports the general guidance. Clearly separate the stable
   product rule from ticket-specific values or actions that still need input.
+- For an exact approved self-service route, generate a ready-to-paste requester
+  instruction with the entry link, required inputs, verification, and failure
+  fallback. This is not a root-cause or completion claim, and it defers manual
+  SRE handling until the documented route fails.
 - For fulfillment with `requester_input`, generate the requester-information
   draft first. Keep the runbook provisional until the requester answers.
 - During fulfillment planning, the post-completion reply is a template that is

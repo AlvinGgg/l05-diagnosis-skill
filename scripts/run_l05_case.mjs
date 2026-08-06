@@ -5,7 +5,7 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import {execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {compareFreshness, extractRetrievalSeedDetails, findKbMatches, loadVaultProfile, retrievalSeeds} from "./evidence-adapter.mjs";
+import {compareFreshness, extractRetrievalSeedDetails, findKbMatches, loadVaultProfile, retrievalSeeds, selectResolutionChannel} from "./evidence-adapter.mjs";
 import {BundleWriter} from "./vendor/jira-collector/bundle-writer.mjs";
 import {loadMissingL05ConfigEnv} from "./vendor/jira-collector/env-loader.mjs";
 import {normalizedContentHash, validateBundle} from "./vendor/jira-collector/validate-jira-bundle.mjs";
@@ -13,6 +13,7 @@ import {evaluateBundle} from "./vendor/ticket-quality/evaluate-jira-ticket-quali
 import {collectOptionalEvidence} from "./provider-loader.mjs";
 import {executeEvidencePlan} from "./provider-coordinator.mjs";
 import {assessIntent} from "./intent-router.mjs";
+import {extractRequestSummary, rankedSafeHttpLocators} from "./request-summary.mjs";
 
 const SKILL_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const COLLECTOR_CLI = path.join(SKILL_ROOT, "scripts/vendor/jira-collector/jira-collect.mjs");
@@ -297,6 +298,18 @@ function buildInspectionTrace(issue, matches, providerEvidence = null) {
   ];
 
   if (providerEvidence) {
+    if (providerEvidence.routing_status === "deferred_self_service") {
+      records.push(traceRecord({
+        status: "not_run",
+        purpose: "Avoid unrelated runtime or control-plane inspection while an approved self-service route can satisfy the current request.",
+        source: "Optional Provider routing",
+        scope: "Provider invocation deferred after an exact self-service automation match.",
+        result: "No optional Provider was invoked; the requester should use the approved automated entry first.",
+        impact: "Prevents an unnecessary manual SRE or Provider path while preserving a failure fallback.",
+        references: providerEvidence.resolution_channel?.source_url ? [providerEvidence.resolution_channel.source_url] : [],
+      }));
+      return records;
+    }
     const providerRecords = (providerEvidence.responses || []).flatMap((response) =>
       (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record})),
     );
@@ -390,7 +403,9 @@ function renderInspectionTrace(records) {
 function reportEvidence(issue, matches, providerEvidence = null) {
   const timeline = [`- ${issue.source.issue_updated_at}: Jira issue updated`, ...(issue.comments || []).map((comment) => `- ${comment.created}: comment ${comment.id}`)].join("\n") || "- No comments collected.";
   const matchLines = matches.map((item) => `- ${item.source_type} / ${item.quality_level} / ${item.freshness} / ${item.match_reason.join(", ")}: ${item.evidence_path}`).join("\n") || "- No matching local precedent.";
-  const providerLines = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `- ${provider_id} / ${record.capability || "unknown"} / ${record.confidence || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}`).join("\n") || "- No optional Provider evidence collected.";
+  const providerLines = providerEvidence?.routing_status === "deferred_self_service"
+    ? "- Not run: an approved self-service resolution channel matched the current request."
+    : (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `- ${provider_id} / ${record.capability || "unknown"} / ${record.confidence || "unknown"}: ${record.summary || record.evidence_type || "evidence collected"}`).join("\n") || "- No optional Provider evidence collected.";
   const providerDetails = (providerEvidence?.responses || []).flatMap((response) => (response.evidence_records || []).filter((record) => record.data !== undefined).map((record) => ({provider_id: response.provider_id, record}))).map(({provider_id, record}) => `### ${provider_id} / ${record.capability || "unknown"}\n\n${JSON.stringify(record.data, null, 2).split("\n").map((line) => `    ${line}`).join("\n")}`).join("\n\n") || "- No optional Provider detail available.";
   const traceRecords = buildInspectionTrace(issue, matches, providerEvidence);
   const investigationTrail = renderInspectionTrace(traceRecords);
@@ -405,45 +420,67 @@ function reportEvidence(issue, matches, providerEvidence = null) {
 function renderIntentAssessment(intent) {
   const supporting = intent.supporting_signals.map((item) => `- ${item.source} / ${item.signal}: ${item.summary}`).join("\n") || "- No decisive content signal.";
   const counter = intent.counter_signals.map((item) => `- ${item.source} / ${item.signal}: ${item.summary}`).join("\n") || "- None.";
-  return `- Work intent: ${intent.work_intent}\n- Delivery mode: ${intent.delivery_mode}\n- Confidence: ${intent.confidence}\n- Execution owner: ${intent.execution_owner}\n- Planning status: ${intent.planning_status}\n- Execution status: ${intent.execution_status}\n\n### Supporting signals\n\n${supporting}\n\n### Counter-signals\n\n${counter}`;
+  return `- Work intent: ${intent.work_intent}\n- Delivery mode: ${intent.delivery_mode}\n- Confidence: ${intent.confidence}\n- Execution owner: ${intent.execution_owner}\n- Planning status: ${intent.planning_status}\n- Execution status: ${intent.execution_status}\n\n### Request summary\n\n${renderRequestSummary(intent.request_summary)}\n\n### Supporting signals\n\n${supporting}\n\n### Counter-signals\n\n${counter}`;
+}
+
+function renderRequestSummary(summary) {
+  if (!summary) return "- Request summary: not available.";
+  const target = summary.target_identity;
+  const targetLine = target
+    ? `${target.kind || "other"} / ${target.locator || "no exact locator"} / ${target.environment || "unknown"} / ${target.source || "unknown"}`
+    : "not identified";
+  const comparisons = (summary.comparison_evidence || []).map((item) => `  - ${item}`).join("\n") || "  - none";
+  const semantic = summary.semantic_fields || {};
+  const semanticLine = Object.entries(semantic).map(([key, value]) => `${key}=${value}`).join(" / ") || "not identified";
+  return `- Requester ask: ${summary.requester_ask || "not identified"}\n- Symptom or goal: ${summary.symptom_or_goal || "not identified"}\n- Target identity: ${targetLine}\n- Structured Jira fields: ${semanticLine}\n- Description evidence: ${summary.description_evidence || "not identified"}\n- Comparison evidence:\n${comparisons}`;
+}
+
+function renderResolutionChannel(channel) {
+  if (!channel) return "- No approved self-service resolution channel matched the current case.";
+  return `- Channel: ${channel.type}\n- Source: ${channel.source_ref} (${channel.source_url})\n- Requester action: ${channel.requester_action}\n- Required inputs: ${channel.required_inputs?.join(", ") || "follow the entry instructions"}\n- Verification: ${channel.verification}\n- Fallback: ${channel.fallback}\n- Evidence path: ${channel.evidence_path}`;
+}
+
+function selfServiceJiraReply(channel) {
+  if (!channel?.type?.startsWith("self_service_")) return "";
+  const inputs = channel.required_inputs?.length
+    ? `\n\n【需填写】\n- ${channel.required_inputs.join("\n- ")}`
+    : "";
+  return `您好，当前场景已有可用的自动化处理入口，无需由 SRE 人工处理。\n\n请通过 [${channel.source_ref}](${channel.source_url}) 提交申请。${inputs}\n\n【完成后验证】\n- ${channel.verification}\n\n如自动化入口提交失败，请在当前工单补充生成的申请编号、尝试时间和页面报错，我们再继续协助。`;
 }
 
 function renderPendingConfirmations(intent) {
   return intent.pending_confirmations.map((item) => `- ${item.kind}: ${item.item}`).join("\n") || "- No material pending confirmation recorded.";
 }
 
-function safeHttpLocators(text) {
-  const values = String(text || "").match(/https?:\/\/[^\s\]|}'"<]+/gi) || [];
-  const locators = [];
-  for (const value of values) {
-    try {
-      const url = new URL(value.replace(/[.,;:]+$/, ""));
-      if (/(?:^|\.)(?:jira|atlassian)\./i.test(url.hostname)
-        && /\/(?:browse|servicedesk\/customer\/portal)\//i.test(url.pathname)) continue;
-      const locator = `${url.protocol}//${url.host}${url.pathname}`;
-      if (!locators.includes(locator)) locators.push(locator);
-    } catch {}
+export function nextEvidenceQuestion(issue, intent, resolutionChannel = null) {
+  if (resolutionChannel) {
+    return {
+      source: resolutionChannel.source_ref,
+      locator: resolutionChannel.source_url,
+      question: resolutionChannel.requester_action,
+      expected_effect: "self_service_resolution",
+      validation: resolutionChannel.verification,
+      stop_condition: resolutionChannel.fallback,
+    };
   }
-  return locators;
-}
-
-export function nextEvidenceQuestion(issue, intent) {
   const text = [
     issue.ticket?.summary,
     issue.ticket?.description_markdown,
     issue.ticket?.environment,
     ...(issue.comments || []).map((item) => item.body_markdown),
   ].filter(Boolean).join("\n");
-  const urls = safeHttpLocators(text);
+  const requestSummary = intent.request_summary || extractRequestSummary(issue);
+  const urls = rankedSafeHttpLocators(issue).map((item) => item.locator);
   const task = /\btask\s*(?:id)?\s*[:：#]?\s*([0-9]{1,12})\b/i.exec(text)?.[1];
   const build = /\bbuild\s*#?\s*([0-9]{1,12})\b/i.exec(text)?.[1];
   const time = /\b20[0-9]{2}[-/][01]?[0-9][-/][0-3]?[0-9][ T][0-2]?[0-9]:[0-5][0-9](?::[0-5][0-9])?\b/.exec(text)?.[0];
   const locators = [
-    ...urls.slice(0, 2),
+    requestSummary.target_identity?.locator || null,
+    ...urls,
     task ? `task:${task}` : null,
     build ? `build:${build}` : null,
     time ? `time:${time}` : null,
-  ].filter(Boolean).slice(0, 4);
+  ].filter(Boolean).filter((item, index, values) => values.indexOf(item) === index).slice(0, 4);
   const locator = locators.length ? locators.join(", ") : `jira:${issue.source.issue_key}`;
   const fulfillment = intent.work_intent === "request_fulfillment";
   const definitions = [
@@ -535,22 +572,24 @@ function renderNextEvidenceQuestion(question) {
   return `- Source: ${question.source}\n- Locator: ${question.locator}\n- Question: ${question.question}\n- Expected effect: ${question.expected_effect}\n- Validation: ${question.validation}\n- Stop condition: ${question.stop_condition}`;
 }
 
-function requesterInformationDraft(intent) {
+function requesterInformationDraft(intent, resolutionChannel = null) {
+  if (resolutionChannel?.type?.startsWith("self_service_")) return "";
   const requests = intent.pending_confirmations.filter((item) => item.kind === "requester_input");
   if (!requests.length) return "";
   const questions = requests.map((item, index) => `${index + 1}. ${item.question}\n   - 用途：${item.item}`).join("\n");
   return `\n\n## Requester information draft (ready to paste)\n\n您好，为确保本次需求按正确范围实施，请补充以下信息：\n\n${questions}\n\n收到以上信息后，我们会重新核对需求意图与方案充分性，并据此完善 SRE 处理流程、验证与回滚方案。当前尚未执行任何变更。`;
 }
 
-function requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
+function requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, resolutionChannel = null, publishResult = null) {
   const evidence = reportEvidence(issue, matches, providerEvidence);
   const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
-  const nextQuestion = nextEvidenceQuestion(issue, intent);
-  const requesterDraft = requesterInformationDraft(intent);
+  const nextQuestion = nextEvidenceQuestion(issue, intent, resolutionChannel);
+  const requesterDraft = requesterInformationDraft(intent, resolutionChannel);
+  const selfServiceDraft = selfServiceJiraReply(resolutionChannel);
   const userSide = requesterDraft
     ? "\n\n## User-side coordination\n\n- Reply with the requester-owned inputs listed above.\n- Internal current-state checks remain with SRE."
     : "";
-  return `# L0.5 request fulfillment: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Analysis mode: read-only evidence collection and human handoff.\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}; no production or Jira write was performed.\n- Completion reply: template only, not ready to paste.\n\n## Request target and scope\n\n- Summary: ${issue.ticket.summary}\n- Environment: ${issue.ticket.environment || "not confirmed"}\n- Components: ${issue.ticket.components.join(", ") || "not confirmed"}\n- The exact desired state and exclusions must come from current Jira facts or confirmed requester input; historical precedent cannot supply production values.\n\n## Current evidence and pending confirmations\n\n${renderPendingConfirmations(intent)}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}${requesterDraft}\n\n## SRE handling runbook\n\n1. Confirm the exact target resource, environment, product/version, control point, requested values, exclusions, approval, change window, and rollback owner.\n2. Capture the current effective configuration and a recoverable pre-change snapshot.\n3. Resolve every requester input and evidence gap that changes the implementation path; use only steps supported by current configuration, authoritative documentation, code, or a reviewed precedent.\n4. Apply only the approved target-scoped change through the responsible SRE control plane. This report does not authorize or perform that action.\n5. Verify the requested behavior, unaffected adjacent scope, monitoring signals, and rollback readiness.\n6. Record the actual configuration difference, change record, execution time, validation result, and requester acceptance when required.${userSide}\n\n## Risks, approval, and rollback\n\n- Any production-affecting action requires explicit target resolution, human review, and the applicable approval.\n- Stop when the current product/control point, affected scope, or rollback path cannot be confirmed.\n- Roll back from the captured snapshot when validation fails or an excluded scope changes unexpectedly, then re-run the pre-change checks.\n\n## Completion criteria and evidence\n\n- Target state is observable in the responsible control plane.\n- Positive and negative validation results are recorded.\n- Adjacent scope remains healthy.\n- Change/approval reference, actual values changed, execution time, and rollback status are retained.\n- The requester has completed or accepted any explicitly assigned user-side step.\n\n## Post-completion Jira reply draft (template, not ready to paste)\n\n您好，您申请的 <需求目标> 已由 SRE 完成处理。\n\n【已完成】\n- <actual target and change, supported by execution evidence>\n\n【验证结果】\n- <actual validation and result>\n\n【用户侧后续】\n- <retain only when requester action or acceptance is still required>\n\n【注意事项】\n- <retain only material limitations or follow-up>\n\nDo not convert this template to ready-to-paste until execution and validation evidence is available.\n\n## Handling trail and references\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; the SRE prechecks above are still required before implementation."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n`;
+  return `# L0.5 request fulfillment: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Analysis mode: read-only evidence collection and human handoff.\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}; no production or Jira write was performed.\n- Completion reply: ${selfServiceDraft ? "self-service draft is ready to paste." : "template only, not ready to paste."}\n\n## Request target and scope\n\n- Summary: ${issue.ticket.summary}\n- Environment: ${issue.ticket.environment || "not confirmed"}\n- Components: ${issue.ticket.components.join(", ") || "not confirmed"}\n- The exact desired state and exclusions must come from current Jira facts or confirmed requester input; historical precedent cannot supply production values.\n\n## Recommended resolution channel\n\n${renderResolutionChannel(resolutionChannel)}\n\n## Current evidence and pending confirmations\n\n${renderPendingConfirmations(intent)}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}${requesterDraft}${selfServiceDraft ? `\n\n## Jira reply draft (ready to paste)\n\n${selfServiceDraft}` : ""}\n\n## ${selfServiceDraft ? "SRE fallback handling runbook" : "SRE handling runbook"}\n\n${selfServiceDraft ? "Use this runbook only if the documented automation route fails or its documented verification does not succeed.\n\n" : ""}1. Confirm the exact target resource, environment, product/version, control point, requested values, exclusions, approval, change window, and rollback owner.\n2. Capture the current effective configuration and a recoverable pre-change snapshot.\n3. Resolve every requester input and evidence gap that changes the implementation path; use only steps supported by current configuration, authoritative documentation, code, or a reviewed precedent.\n4. Apply only the approved target-scoped change through the responsible SRE control plane. This report does not authorize or perform that action.\n5. Verify the requested behavior, unaffected adjacent scope, monitoring signals, and rollback readiness.\n6. Record the actual configuration difference, change record, execution time, validation result, and requester acceptance when required.${userSide}\n\n## Risks, approval, and rollback\n\n- Any production-affecting action requires explicit target resolution, human review, and the applicable approval.\n- Stop when the current product/control point, affected scope, or rollback path cannot be confirmed.\n- Roll back from the captured snapshot when validation fails or an excluded scope changes unexpectedly, then re-run the pre-change checks.\n\n## Completion criteria and evidence\n\n- Target state is observable in the responsible control plane.\n- Positive and negative validation results are recorded.\n- Adjacent scope remains healthy.\n- Change/approval reference, actual values changed, execution time, and rollback status are retained.\n- The requester has completed or accepted any explicitly assigned user-side step.\n\n## Post-completion Jira reply draft (template, not ready to paste)\n\n您好，您申请的 <需求目标> 已由 SRE 完成处理。\n\n【已完成】\n- <actual target and change, supported by execution evidence>\n\n【验证结果】\n- <actual validation and result>\n\n【用户侧后续】\n- <retain only when requester action or acceptance is still required>\n\n【注意事项】\n- <retain only material limitations or follow-up>\n\nDo not convert this template to ready-to-paste until execution and validation evidence is available.\n\n## Handling trail and references\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; the SRE prechecks above are still required before implementation."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n`;
 }
 
 function unclearReportFor(issue, injection, intent) {
@@ -559,21 +598,25 @@ function unclearReportFor(issue, injection, intent) {
   return `# L0.5 clarification required: ${issue.source.issue_key}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Current status\n\n- Planning status: ${intent.planning_status}.\n- Execution status: ${intent.execution_status}.\n- Jira facts were collected, but no Vault, Provider, code, browser, or runtime evidence was inspected because the requested outcome is unclear.\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n\n## Investigation trail\n\n${investigationTrail}\n\n${requesterInformationDraft(intent).trim()}\n\n## Evidence gaps\n\n${renderPendingConfirmations(intent)}${injectionGap}\n`;
 }
 
-function troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
+function troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, resolutionChannel = null, publishResult = null) {
   const evidence = reportEvidence(issue, matches, providerEvidence);
   const gaps = evidenceGaps(issue, injection, vaultContract, providerEvidence);
   const structuredHypotheses = hypotheses(issue, matches, providerEvidence);
-  const nextQuestion = nextEvidenceQuestion(issue, intent);
+  const nextQuestion = nextEvidenceQuestion(issue, intent, resolutionChannel);
+  const selfServiceDraft = selfServiceJiraReply(resolutionChannel);
   const mixedSection = intent.work_intent === "mixed"
-    ? `\n\n## Request fulfillment subtask\n\n**blocked** — keep the requested implementation separate from the investigation. Do not turn an unconfirmed causal hypothesis into an SRE change step.\n\n${renderPendingConfirmations(intent)}${requesterInformationDraft(intent)}`
+    ? `\n\n## Request fulfillment subtask\n\n**blocked** — keep the requested implementation separate from the investigation. Do not turn an unconfirmed causal hypothesis into an SRE change step.\n\n${renderPendingConfirmations(intent)}${requesterInformationDraft(intent, resolutionChannel)}`
     : "";
-  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Timeline\n\n${evidence.timeline}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}\n\n## Investigation trail\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause.${mixedSection}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Recommended change\n\nNo change is recommended until the bounded evidence question above identifies the first causal or configuration boundary. Any production-affecting change requires human review and approval.\n\n## Verification plan\n\nUse the same target identity and locator to verify the observed boundary before and after any approved change, then check one negative and one adjacent scope.\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || "- No collection gap recorded; targeted diagnosis evidence is still required."}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain.\n`;
+  const recommendedChange = resolutionChannel
+    ? `${resolutionChannel.requester_action}\n\nFallback: ${resolutionChannel.fallback}`
+    : "No change is recommended until the bounded evidence question above identifies the first causal or configuration boundary. Any production-affecting change requires human review and approval.";
+  return `# L0.5 diagnosis: ${issue.source.issue_key}\n\n## Collection status\n\n- Core issue: complete\n- Schema: ${issue.schema_version}\n- Unsupported ADF nodes: ${issue.collection.unsupported_adf_nodes.join(", ") || "none"}\n\n## Ticket facts\n\n- Summary: ${issue.ticket.summary}\n- Status: ${issue.ticket.status}\n- Updated: ${issue.source.issue_updated_at}\n- Components: ${issue.ticket.components.join(", ") || "none"}\n\n## Intent assessment\n\n${renderIntentAssessment(intent)}\n\n## Timeline\n\n${evidence.timeline}\n\n## Recommended resolution channel\n\n${renderResolutionChannel(resolutionChannel)}\n\n## Local KB matches and freshness\n\n${evidence.matchLines}\n\n## Optional Provider evidence\n\n${evidence.providerLines}\n\n## Optional Provider evidence details\n\n${evidence.providerDetails}\n\n## Investigation trail\n\n${evidence.investigationTrail}\n\n## Evidence inspected\n\n${evidence.inspectedEvidence}\n\n## Hypotheses with supporting and contradicting evidence\n\n${structuredHypotheses.map((item) => `- Hypothesis: ${item.hypothesis}\n  - Supporting: ${item.supporting_evidence.join("; ")}\n  - Contradicting: ${item.contradicting_evidence.join("; ")}\n  - Missing: ${item.missing_evidence.join("; ")}\n  - Confidence: ${item.confidence}`).join("\n")}\n\n## Root cause assessment\n\n${selfServiceDraft ? "**not required before self-service** — an approved automation entry exactly matches the documented scenario. Do not start SRE diagnosis unless the entry fails or its documented verification does not succeed." : "**unresolved** — historical and Provider evidence must be interpreted together with current causal evidence before confirming a root cause."}${mixedSection}\n\n## Smallest actionable next step\n\n${renderNextEvidenceQuestion(nextQuestion)}\n\n## Recommended change\n\n${recommendedChange}\n\n## Verification plan\n\n${selfServiceDraft ? resolutionChannel.verification : "Use the same target identity and locator to verify the observed boundary before and after any approved change, then check one negative and one adjacent scope."}\n\n## Access and evidence gaps\n\n${gaps.map((item) => `- ${item}`).join("\n") || (selfServiceDraft ? "- No additional SRE evidence is needed before using the documented self-service route." : "- No collection gap recorded; targeted diagnosis evidence is still required.")}\n\n## Optional KB publish result\n\n${publishResult ? `- ${publishResult.outcome}: ${publishResult.bundle}` : "- Not requested."}\n\n## Jira reply draft\n\n${selfServiceDraft || "- Not generated: root cause is unresolved. Generate a ready-to-paste draft only after current evidence confirms the causal chain."}\n`;
 }
 
-function reportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, publishResult = null) {
-  if (intent.work_intent === "request_fulfillment") return requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, publishResult);
+function reportFor(issue, matches, injection, vaultContract, intent, providerEvidence = null, resolutionChannel = null, publishResult = null) {
+  if (intent.work_intent === "request_fulfillment") return requestFulfillmentReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, resolutionChannel, publishResult);
   if (intent.work_intent === "unclear") return unclearReportFor(issue, injection, intent);
-  return troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, publishResult);
+  return troubleshootingReportFor(issue, matches, injection, vaultContract, intent, providerEvidence, resolutionChannel, publishResult);
 }
 
 export async function runCase({
@@ -619,7 +662,10 @@ export async function runCase({
     stage = "intent_routing";
     const injection = detectPromptInjection(`${normalized.ticket.description_markdown}\n${normalized.comments.map((item) => item.body_markdown).join("\n")}`);
     const routingProfile = loadVaultProfile(kbRoot);
-    const intentAssessment = assessIntent(withoutInstructionInjection(normalized), routingProfile.field_mappings);
+    const intentAssessment = assessIntent(
+      withoutInstructionInjection(normalized),
+      routingProfile.jira_config || routingProfile.field_mappings,
+    );
     if (intentAssessment.work_intent === "unclear") {
       const report = reportFor(normalized, [], injection, null, intentAssessment);
       const summary = {
@@ -653,9 +699,23 @@ export async function runCase({
     const vaultContract = readVaultContract(kbRoot);
     const matches = findKbMatches(kbRoot, normalized, normalized.source.issue_updated_at);
     const seedDetails = extractRetrievalSeedDetails(normalized);
-    const providerEvidence = await collectOptionalEvidence({kbRoot, issue: normalized, retrievalSeedDetails: seedDetails, providerDir});
+    const resolutionChannel = selectResolutionChannel(matches);
+    const initialEvidenceQuestion = nextEvidenceQuestion(normalized, intentAssessment, resolutionChannel);
+    const providerEvidence = resolutionChannel?.type?.startsWith("self_service_")
+      ? {
+        provider_directory: null,
+        problem_type: "support.self_service",
+        responses: [],
+        gaps: [],
+        deferred_providers: [],
+        provider_decisions: [{status: "deferred", reason: "self_service_resolution_channel", evidence_question: initialEvidenceQuestion}],
+        routing_status: "deferred_self_service",
+        resolution_channel: resolutionChannel,
+      }
+      : await collectOptionalEvidence({kbRoot, issue: normalized, retrievalSeedDetails: seedDetails, providerDir, evidenceQuestion: initialEvidenceQuestion});
     if (evidencePlan) {
       stage = "planned_provider_evidence";
+      if (providerEvidence.routing_status === "deferred_self_service") providerEvidence.routing_status = "explicit_evidence_plan";
       const planned = await executeEvidencePlan({
         kbRoot,
         issue: normalized,
@@ -670,7 +730,7 @@ export async function runCase({
       providerEvidence.evidence_plan_status = planned.status;
       providerEvidence.loki_budget = planned.budget;
     }
-    let report = reportFor(normalized, matches, injection, vaultContract, intentAssessment, providerEvidence);
+    let report = reportFor(normalized, matches, injection, vaultContract, intentAssessment, providerEvidence, resolutionChannel);
     let publishResult = null;
     if (publishToKb) {
       const candidate = structuredClone(normalized);
@@ -683,7 +743,7 @@ export async function runCase({
       candidate.content_hash = normalizedContentHash(candidate);
       publishResult = new BundleWriter({outputRoot: path.join(kbRoot, "inbox/jira"), collectorName: "l05-diagnosis", collectorVersion: "2.0.0"}).write({rawIssue: {source: candidate.source, retained_in_temporary_case_only: true}, normalized: candidate, attachmentFiles: new Map()});
       publishResult.quality = evaluateBundle(publishResult.bundle, {vault: kbRoot, outputDir: path.join(kbRoot, "system/reports/jira-quality")});
-      report = reportFor(candidate, matches, injection, vaultContract, intentAssessment, providerEvidence, publishResult);
+      report = reportFor(candidate, matches, injection, vaultContract, intentAssessment, providerEvidence, resolutionChannel, publishResult);
     }
     const summary = {
       issue_key: normalized.source.issue_key,
@@ -691,11 +751,12 @@ export async function runCase({
       intent_assessment: intentAssessment,
       vault_contract: vaultContract,
       kb_matches: matches,
+      resolution_channel: resolutionChannel,
       retrieval_seeds: retrievalSeeds(normalized),
       retrieval_seed_details: seedDetails,
       optional_provider_evidence: providerEvidence,
       inspection_trace: buildInspectionTrace(normalized, matches, providerEvidence),
-      next_evidence_question: nextEvidenceQuestion(normalized, intentAssessment),
+      next_evidence_question: initialEvidenceQuestion,
       prompt_injection_detected: injection,
       hypotheses: intentAssessment.work_intent === "request_fulfillment" ? [] : hypotheses(normalized, matches, providerEvidence),
       publish_result: publishResult,

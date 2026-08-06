@@ -9,9 +9,11 @@
     "inbox_jira": "inbox/jira",
     "raw_documents": "raw/documents",
     "raw_tickets": "raw/tickets",
+    "raw_files": "raw/files",
     "wiki_sources_documents": "wiki/sources/documents",
     "wiki_sources_tickets": "wiki/sources/tickets",
     "wiki_sources_jira": "wiki/sources/jira",
+    "wiki_sources_general": "wiki/sources",
     "wiki_howtos": "wiki/howtos",
     "wiki_systems": "wiki/systems",
     "wiki_topics": "wiki/topics",
@@ -19,7 +21,8 @@
     "quality_reports": "system/reports/jira-quality"
   },
   "jira": {
-    "field_mappings": {}
+    "field_mappings": {},
+    "field_value_paths": {}
   },
   "code": {
     "repositories": [],

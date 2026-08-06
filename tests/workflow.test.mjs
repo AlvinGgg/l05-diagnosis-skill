@@ -218,6 +218,38 @@ test("next evidence question uses existing locators and domain-specific stop con
   assert.doesNotMatch(linkedJira.locator, /jira\.example\.test/);
 });
 
+test("description-first request summary preserves the exact API target and environment comparison", () => {
+  const corsIssue = intentIssue({
+    summary: "Swagger release follow-up",
+    description: "QA https://qa-console.example.test/login works. Production API https://api.prod.example.test/oidc/callback?code=one-time-code is blocked by CORS preflight; please investigate why the access control check fails.",
+    comments: [{id: "resolution", body_markdown: "当前已针对 Swagger 发布完成配置，请等待生效。"}],
+  });
+  corsIssue.source = {issue_key: "DEMO-CORS"};
+  const assessment = assessIntent(corsIssue);
+  assert.equal(assessment.work_intent, "problem_investigation");
+  assert.deepEqual(assessment.request_summary.target_identity, {
+    kind: "api",
+    locator: "https://api.prod.example.test/oidc/callback",
+    environment: "prod",
+    source: "description",
+  });
+  assert.ok(assessment.request_summary.comparison_evidence.some((item) => /QA/i.test(item)));
+  assert.ok(assessment.request_summary.comparison_evidence.some((item) => /Production/i.test(item)));
+  const next = nextEvidenceQuestion(corsIssue, assessment);
+  assert.match(next.locator, /^https:\/\/api\.prod\.example\.test\/oidc\/callback/);
+});
+
+test("request summary preserves mapped Domain and child Application", () => {
+  const current = intentIssue({summary: "Kubernetes application health", description: "请排查当前异常 Pod"});
+  current.custom_fields = [{name: "Domain Application", schema_type: "option-with-child", value: {value: "example-domain", child: {value: "example-app"}}}];
+  const assessment = assessIntent(current, {
+    field_mappings: {domain: ["Domain Application"], application: ["Domain Application"]},
+    field_value_paths: {domain: ["value"], application: ["child.value"]},
+  });
+  assert.deepEqual(assessment.request_summary.target_identity, {kind: "application", locator: null, environment: "unknown", source: "jira.custom_field"});
+  assert.deepEqual(assessment.request_summary.semantic_fields, {domain: "example-domain", application: "example-app"});
+});
+
 test("retrieval is source-first, quality-aware, and stable", () => {
   const root = testKb();
   const mediumReport = {ingest_id: "medium", content_hash: "medium-hash", decision: "promote_needs_review", resolution_quality: {score: 76}, knowledge_value: {score: 6}};
@@ -302,6 +334,52 @@ test("automation comments do not become retrieval seeds", () => {
   assert.equal(seeds.includes("Swagger"), true);
 });
 
+test("unapproved raw entry guide cannot defer SRE handling", () => {
+  const kbRoot = testKb();
+  fs.mkdirSync(path.join(kbRoot, "raw/files"), {recursive: true});
+  fs.writeFileSync(path.join(kbRoot, "raw/files/unreviewed.md"), "### Account recovery\n- **入口名称**: (Automated) Confluence Account Recovery\n- **入口链接**: https://jira.example.test/servicedesk/customer/portal/3/create/1750\n- **适用场景**: 登录 Confluence 提示 SSO failed\n");
+  const matches = findKbMatches(kbRoot, intentIssue({summary: "Confluence SSO failed", description: "登录 Confluence 提示 SSO failed，错误码 MO_OAUTH_ERROR_00018。"}));
+  assert.equal(matches.some((item) => item.source_type === "raw_entry_guide"), false);
+});
+
+test("self-service entry must use the current Jira host", () => {
+  const kbRoot = testKb();
+  fs.mkdirSync(path.join(kbRoot, "raw/files"), {recursive: true});
+  fs.writeFileSync(path.join(kbRoot, "index.md"), "# test\n\n- [[wiki/sources/entry-guides|automation entry guide]]\n");
+  fs.writeFileSync(path.join(kbRoot, "wiki/sources/entry-guides.md"), "# entry guide\n");
+  fs.writeFileSync(path.join(kbRoot, "raw/files/entry-guides.md"), "### Account recovery\n- **入口名称**: (Automated) Confluence Account Recovery\n- **入口链接**: https://untrusted.example.test/servicedesk/customer/portal/3/create/1750\n- **适用场景**: 登录 Confluence 提示 SSO failed\n");
+  const current = intentIssue({summary: "Confluence SSO failed", description: "登录 Confluence 提示 SSO failed，错误码 MO_OAUTH_ERROR_00018。"});
+  current.source.base_url = "https://jira.example.test";
+  const matches = findKbMatches(kbRoot, current);
+  assert.equal(matches.some((item) => item.resolution_channel), false);
+});
+
+test("exact automated entry guide is selected before SRE or Provider handling", async () => {
+  const kbRoot = testKb();
+  fs.mkdirSync(path.join(kbRoot, "raw/files"), {recursive: true});
+  fs.writeFileSync(path.join(kbRoot, "index.md"), "# test\n\n- [[wiki/sources/entry-guides精炼|自动化服务入口速查表]]\n");
+  fs.writeFileSync(path.join(kbRoot, "wiki/sources/entry-guides精炼.md"), "---\ntitle: 自动化服务入口速查表\n---\n\nConfluence account recovery entry guide.\n");
+  fs.writeFileSync(path.join(kbRoot, "raw/files/entry_guides精炼.md"), "### 7. Confluence 授权\n- **入口名称**: (Automated) Confluence Authorization Request\n- **入口链接**: https://jira.example.test/servicedesk/customer/portal/3/create/1248\n- **适用场景**: 为用户授权某个 Confluence Space 的权限\n- **必填字段**: Summary, Permission, Confluence Space\n\n### 15. Confluence 账号激活\n- **入口名称**: (Automated) Confluence Account Reactive Request\n- **入口链接**: https://jira.example.test/servicedesk/customer/portal/3/create/1750\n- **适用场景**: 登录 Confluence 提示 SSO failed 时，提此单启用账号\n- **必填字段**: User Email Addresses（支持多个）\n- **特别说明**: 工单执行完成后应在当天登录，否则第二天早上 8 点会被重新禁用\n");
+  const fixture = derivedFixture({
+    key: "DEMO-1750",
+    summary: "Confluence SSO failed",
+    description: "登录 Confluence 提示 SSO failed，错误码 MO_OAUTH_ERROR_00018。",
+    issueType: "Bug",
+  });
+  const result = await runCase({issue: "DEMO-1750", baseUrl: "https://jira.example.test", kbRoot, fixture, keepTemp: true});
+  assert.equal(result.status, "complete");
+  assert.equal(result.intent_assessment.work_intent, "problem_investigation");
+  assert.equal(result.provider_evidence.routing_status, "deferred_self_service");
+  assert.equal(result.provider_evidence.responses.length, 0);
+  assert.equal(result.kb_matches[0].resolution_channel.source_ref, "(Automated) Confluence Account Reactive Request");
+  assert.match(result.report, /https:\/\/jira\.example\.test\/servicedesk\/customer\/portal\/3\/create\/1750/);
+  assert.match(result.report, /无需由 SRE 人工处理/);
+  assert.match(result.report, /当天登录/);
+  const summary = JSON.parse(fs.readFileSync(path.join(result.case_dir, "case-summary.json"), "utf8"));
+  assert.equal(summary.resolution_channel.type, "self_service_automation");
+  assert.equal(summary.inspection_trace.at(-1).status, "not_run");
+});
+
 test("offline fixture creates isolated case, uses source evidence, and preserves the fixed report", async () => {
   const kbRoot = testKb();
   writeReport(kbRoot, "system/reports/jira-quality/demo.json", {ingest_id: "demo", content_hash: "demo-hash", decision: "promote_active", resolution_quality: {score: 90}, knowledge_value: {score: 8}});
@@ -370,13 +448,14 @@ test("unclear fixture asks the requester before Vault or Provider retrieval", as
 test("offline case renders current optional Provider evidence with provenance owner", async () => {
   const kbRoot = testKb();
   const profile = JSON.parse(fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/vault-template/.l05-profile.json"), "utf8"));
-  profile.optional_evidence_providers = [{provider_id: "fixture", enabled: true, capabilities: ["ci.build.resolve"], match: {keywords: ["collector"], match_mode: "any"}, config: {}}];
+  profile.optional_evidence_providers = [{provider_id: "fixture", enabled: true, capabilities: ["ci.build.resolve"], match: {keywords: ["jenkins"], match_mode: "any"}, config: {}}];
   fs.writeFileSync(path.join(kbRoot, ".l05-profile.json"), JSON.stringify(profile));
   const providerDir = fs.mkdtempSync(path.join(os.tmpdir(), "l05-case-provider-"));
   const providerScript = path.join(providerDir, "fixture-provider.mjs");
   fs.writeFileSync(providerScript, `process.stdin.resume(); process.stdin.on("end", () => process.stdout.write(JSON.stringify({schema_version:"l05-provider-response/v1",provider_id:"fixture",status:"ok",evidence_records:[{capability:"ci.build.resolve",evidence_type:"fixture",summary:"Current build resolved",confidence:"confirmed",data:{build_number:17,marker:"sanitized failure marker"},provenance:{access_mode:"read-only"}}],candidates:[],gaps:[]})));`);
   fs.writeFileSync(path.join(providerDir, "fixture.json"), JSON.stringify({schema_version: "l05-provider-manifest/v1", provider_id: "fixture", display_name: "Fixture", command: [process.execPath, providerScript], capabilities: ["ci.build.resolve"], request_schema: "l05-provider-request/v1", response_schema: "l05-provider-response/v1"}));
-  const result = await runCase({issue: "DEMO-3", baseUrl: "https://jira.example.test", kbRoot, fixture: FIXTURE, providerDir});
+  const fixture = derivedFixture({key: "DEMO-17", summary: "Jenkins build failed", description: "Jenkins https://jenkins.example.test/job/demo/17/ build failed"});
+  const result = await runCase({issue: "DEMO-17", baseUrl: "https://jira.example.test", kbRoot, fixture, providerDir});
   assert.equal(result.status, "complete");
   assert.match(result.report, /fixture \/ ci\.build\.resolve \/ confirmed: Current build resolved/);
   assert.match(result.report, /"build_number": 17/);

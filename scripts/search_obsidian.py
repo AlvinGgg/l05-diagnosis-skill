@@ -23,11 +23,13 @@ DEFAULT_PATHS = [
     "wiki/projects",
     "wiki/systems",
     "wiki/topics",
+    "raw/files",
     "raw/tickets",
 ]
 
 PROFILE_SEARCH_KEYS = (
     "index",
+    "wiki_sources_general",
     "wiki_sources_documents",
     "wiki_sources_tickets",
     "wiki_sources_jira",
@@ -35,6 +37,7 @@ PROFILE_SEARCH_KEYS = (
     "wiki_systems",
     "wiki_topics",
     "wiki_concepts",
+    "raw_files",
     "raw_tickets",
 )
 
@@ -47,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regex", action="store_true", help="Treat joined terms as a regex.")
     parser.add_argument("--case-sensitive", action="store_true")
     parser.add_argument("--context", type=int, default=1)
-    parser.add_argument("--max-results", type=int, default=80)
+    parser.add_argument("--max-results", type=int, default=80, help="Maximum matching files to return.")
     parser.add_argument("--max-text-chars", type=int, default=500)
     parser.add_argument("--json", action="store_true", default=True)
     return parser.parse_args()
@@ -86,7 +89,30 @@ def profile_search_paths(vault: Path) -> list[str]:
     if not profile or not validation["valid"]:
         return DEFAULT_PATHS
     knowledge = profile["knowledge"]
-    return list(dict.fromkeys(knowledge[key] for key in PROFILE_SEARCH_KEYS if knowledge.get(key)))
+    configured = [knowledge[key] for key in PROFILE_SEARCH_KEYS if knowledge.get(key)]
+    indexed = indexed_source_paths(vault, knowledge.get("index", "index.md"))
+    uncovered_indexed = [
+        candidate
+        for candidate in indexed
+        if not any(candidate == root or candidate.startswith(f"{root.rstrip('/')}/") for root in configured)
+    ]
+    legacy_entry_guides = ["raw/files"] if (vault / "raw/files").is_dir() else []
+    return list(dict.fromkeys([*configured, *uncovered_indexed, *legacy_entry_guides]))
+
+
+def indexed_source_paths(vault: Path, index_relative: str) -> list[str]:
+    index = vault / index_relative
+    if not index.is_file():
+        return []
+    targets: list[str] = []
+    for match in re.finditer(r"\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]|\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)", index.read_text(encoding="utf-8", errors="replace")):
+        raw = (match.group(1) or match.group(2) or "").strip().removeprefix("./")
+        relative = raw if raw.endswith(".md") else f"{raw}.md"
+        candidate = vault / relative
+        if not relative.startswith("wiki/sources/") or not candidate.is_file():
+            continue
+        targets.append(relative)
+    return list(dict.fromkeys(targets))
 
 
 def build_pattern(terms: list[str], is_regex: bool) -> str:
@@ -123,30 +149,34 @@ def rg_search(
     if proc.returncode not in (0, 1):
         raise SystemExit(proc.stderr.strip() or "rg failed")
 
-    matches: list[dict[str, Any]] = []
+    events_by_path: dict[str, list[dict[str, Any]]] = {}
+    match_counts: dict[str, int] = {}
     for line in proc.stdout.splitlines():
-        if len(matches) >= max_results:
-            break
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") not in {"match", "context"}:
+        event_type = event.get("type")
+        if event_type not in {"match", "context"}:
             continue
         data = event.get("data") or {}
         path = Path(data.get("path", {}).get("text", ""))
         if not path:
             continue
-        matches.append(
+        relative = relpath(path, vault)
+        if event_type == "match":
+            match_counts[relative] = match_counts.get(relative, 0) + 1
+        events_by_path.setdefault(relative, []).append(
             {
-                "type": event.get("type"),
-                "path": relpath(path, vault),
+                "type": event_type,
+                "path": relative,
                 "line_number": data.get("line_number"),
                 "text": truncate_text((data.get("lines") or {}).get("text", "").rstrip("\n"), max_text_chars),
-                "source_layer": source_layer(relpath(path, vault)),
+                "source_layer": source_layer(relative),
             }
         )
-    return matches
+    selected = sorted(match_counts, key=lambda relative: (-match_priority(relative, match_counts[relative]), relative))[:max_results]
+    return [event for relative in selected for event in events_by_path[relative]]
 
 
 def python_search(
@@ -166,19 +196,19 @@ def python_search(
             files.append(path)
         else:
             files.extend(child for child in path.rglob("*.md") if child.is_file())
-    matches: list[dict[str, Any]] = []
-    for file_path in files:
+    events_by_path: dict[str, list[dict[str, Any]]] = {}
+    match_counts: dict[str, int] = {}
+    for file_path in sorted(set(files)):
         lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
         for index, line in enumerate(lines):
             if not regex.search(line):
                 continue
+            rel = relpath(file_path, vault)
+            match_counts[rel] = match_counts.get(rel, 0) + 1
             start = max(0, index - context)
             end = min(len(lines), index + context + 1)
             for number in range(start, end):
-                if len(matches) >= max_results:
-                    return matches
-                rel = relpath(file_path, vault)
-                matches.append(
+                events_by_path.setdefault(rel, []).append(
                     {
                         "type": "match" if number == index else "context",
                         "path": rel,
@@ -187,7 +217,8 @@ def python_search(
                         "source_layer": source_layer(rel),
                     }
                 )
-    return matches
+    selected = sorted(match_counts, key=lambda relative: (-match_priority(relative, match_counts[relative]), relative))[:max_results]
+    return [event for relative in selected for event in events_by_path[relative]]
 
 
 def relpath(path: Path, root: Path) -> str:
@@ -202,11 +233,29 @@ def source_layer(rel: str) -> str:
         return "index"
     if rel.startswith("raw/tickets/"):
         return "raw_ticket"
+    if rel.startswith("raw/files/"):
+        return "raw_file"
     if rel.startswith("wiki/sources/"):
         return "wiki_source"
     if rel.startswith("wiki/"):
         return "wiki"
     return "other"
+
+
+def match_priority(rel: str, match_count: int) -> int:
+    filename = Path(rel).name.casefold()
+    priority = min(match_count, 3) * 100
+    if re.search(r"entry[-_ ]?guides?|入口", filename, re.IGNORECASE):
+        priority += 1000
+        if rel.startswith("raw/files/"):
+            priority += 100
+    if rel.startswith("wiki/sources/"):
+        priority += 20
+    if rel == "index.md":
+        priority -= 20
+    if rel.startswith("raw/tickets/"):
+        priority -= 20
+    return priority
 
 
 def truncate_text(text: str, max_chars: int) -> str:

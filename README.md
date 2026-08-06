@@ -54,6 +54,11 @@ Provider 只在具体证据问题和严格 `l05-evidence-plan/v1` 下调用；Co
 总预算、Gateway 对账和逐步骤处理链，Provider 不接受调用方提供的 URL、Header、
 LogQL、正则或自由查询。
 
+每次 Provider 调用都必须绑定具体 `evidence_question` 和安全 Locator。Kubernetes
+集群候选由非秘密 Profile 顶层 `cluster_directory` 解析；精确 Namespace、Pod、
+Workload 优先于 Application-only 的有界定位。Rancher 资源只作为请求人的观察来源，
+不会触发浏览器、链接工具、Rancher API 或认证。
+
 - **默认只读**：不会评论、转派、变更状态或执行其他 Jira 写操作。
 - **人工审核**：问题类只有根因得到当前证据确认时才生成完整回复；需求类只有执行和验证证据齐全后才生成可发送的完成回复。
 - **知识发布受控**：只有用户明确授权后，才在 Vault 的 Inbox 中生成脱敏候选；不会自动晋升为正式知识。
@@ -69,7 +74,7 @@ LogQL、正则或自由查询。
 | 附件与链接 | 仅在验证具体假设时按安全策略访问 |
 | 代码分析 | 优先获取指定分支、Tag 或 Commit 的隔离远程快照 |
 | 浏览器与运行时 | 由 Agent 在必要且已授权时使用可用工具补充证据 |
-| Kubernetes | 通过独立 Kubectl Provider 读取投影后的 Ingress、Service、Endpoint、Workload、Pod、Event 和受控日志证据 |
+| Kubernetes | 通过独立 Kubectl Provider 按精确 Locator 或有界 Application 定位读取投影后的 Ingress、Service、Endpoint、Workload、Pod、Event 和受控日志证据 |
 | Loki | 在具体假设和严格 Evidence Plan 下，通过独立 Loki Provider 串行执行健康检查、选择器解析、索引预估和脱敏小查询 |
 | 处理输出 | 问题类输出结构化诊断；需求类输出 SRE runbook、用户补充草稿、验证、回滚和完成后回复模板 |
 | 知识沉淀 | 明确授权后生成脱敏 Inbox 候选，等待人工整理 |
@@ -141,7 +146,7 @@ python3 "$L05_SKILL_DIR/scripts/l05_setup.py" doctor
 1. 知识库：外置配置中的绝对 Vault 路径及完整目录契约。
 2. 常规配置：有效的 Jira 根地址与认证模式；Basic 模式还需本机用户标识。
 3. 敏感配置：非占位的只读 Token，以及私有配置文件的安全权限。
-4. Vault Profile：存在且通过校验；代码仓库目录可以为空。
+4. Vault Profile：存在且通过校验；代码仓库目录可以为空，同时报告 Provider capability 漂移和 Kubernetes Locator 迁移缺口。
 5. 运行时：Node.js 可用。
 6. 复检：重新运行 `doctor`，只有 `status=ready` 才进入真实工单处理。
 
@@ -200,24 +205,58 @@ python3 "$L05_SKILL_DIR/scripts/l05_profile.py" init \
 
 Profile 用于映射 Vault 目录、可选 Jira 语义字段，并在代码排查时把问题类型和当前信号路由到候选仓库。它可以保留在私有 Vault 或团队配置仓库中，但只能包含非秘密信息；Token、密码、Cookie、私钥和带凭据的仓库 URL 都会被校验器拒绝。
 
-可选 Jira 字段映射使用公共语义槽位，组织字段 ID 或名称只保留在私有 Profile 中：
+可选 Jira 字段映射使用公共语义槽位，组织字段 ID、名称和值路径只保留在私有
+Profile 中：
 
 ```json
 {
   "jira": {
     "field_mappings": {
+      "domain": ["Domain Application"],
+      "application": ["Domain Application"],
       "request_type": ["customfield_12345"],
       "question_classification": ["Question Classification"],
       "issue_category": ["customfield_67890"],
       "environment": ["Environment"]
+    },
+    "field_value_paths": {
+      "domain": ["value"],
+      "application": ["child.value"]
     }
   }
 }
 ```
 
-允许的槽位只有 `request_type`、`question_classification`、`issue_category`
-和 `environment`。这些值只作为意图判断的辅助信号，不能覆盖请求人的明确表述，
-也不能证明当前生产状态。
+允许的映射槽位包括 `domain`、`application`、`event_timestamp`、
+`request_type`、`question_classification`、`issue_category`、`environment`、
+`namespace`、`request_id`、`source_environment`、`subscription` 和
+`target_environment`。`field_value_paths` 只用于 `domain`、`application` 和
+`namespace` 的安全嵌套值解析。这些值只作为意图与证据定位信号，不能覆盖请求人的
+明确表述，也不能证明当前生产状态。
+
+Kubernetes 集群目录独立于 Kubectl 私有 Policy，只保存非秘密的确定性匹配规则和
+最多两个已批准候选：
+
+```json
+{
+  "cluster_directory": {
+    "routes": [
+      {
+        "id": "example-production",
+        "match": {
+          "environment": ["prod"],
+          "subscription": ["example-subscription"],
+          "cloud": "azure"
+        },
+        "cluster_aliases": ["example-prod"]
+      }
+    ]
+  }
+}
+```
+
+别名到 kubeconfig/context 的映射仍只存在于安装器锁定的本机私有 Policy；公共
+Profile、Jira 和运行请求都不能提供 kubeconfig、context 或任意命令。
 
 配置示例：
 
@@ -272,8 +311,11 @@ python3 "$L05_SKILL_DIR/scripts/l05_setup.py" doctor
 - 技术文档、Runbook、Wiki：`inbox/documents/`
 - 人工筛选后的历史工单：`inbox/tickets/`
 - L05 明确授权后生成的结构化 Jira 候选：`inbox/jira/`
+- 工单处理中由用户/人工整理且明确授权保留的补充知识：`inbox/ticket-additional-knowledge/`
 
 不要直接把新内容写入 `raw/` 或 `wiki/`。Inbox 是人工审核边界。不要采集登录页面、Token、Cookie、私钥、带签名参数的 URL 或无关个人信息。
+补充知识候选必须标记 `needs-review` 并保留人工来源和证据缺口；它不是 Jira Bundle，
+也不能作为已验证的当前事实自动进入普通检索。
 
 ### 让 Obsidian Agent 整理 Inbox
 
@@ -311,12 +353,13 @@ Skill 会按以下顺序执行：
 
 1. 运行本地配置检查。
 2. 只读获取并验证当前 Jira 工单。
-3. 生成结构化意图判断；意图不明时先输出用户补充信息草稿。
-4. 读取并校验 Vault Profile，用当前问题或工作类型、信号和组件解析候选平台仓库。
-5. 问题类检索因果证据；需求类检索操作、参数、限制、验证和回滚依据。
-6. 仅针对具体假设或实施步骤检查附件、链接、代码、Provider、浏览器或运行时证据。
-7. 问题类输出事实、假设、证据缺口、根因等级和排查链路；需求类输出 SRE runbook、待确认项、完成证据和处理链路。
-8. 排查类仅在根因确认时附带完整回复；需求类在规划阶段只输出不可发送的完成后模板，取得执行与验证证据后才转为可发送草稿。
+3. 先生成 description-first `request_summary`，再做结构化意图判断；意图不明时输出最小用户补充信息草稿。
+4. 读取并校验 Vault Profile，用当前问题或工作类型、信号和组件解析候选平台仓库与集群目录。
+5. 优先检查与当前目标或症状精确匹配的已批准自助/自动化入口；匹配时给出入口、必填信息、验证和失败回退。
+6. 问题类检索因果证据；需求类检索操作、参数、限制、验证和回滚依据。
+7. 仅针对具体 `evidence_question` 或实施步骤检查附件、链接、代码、Provider、浏览器或运行时证据。
+8. 问题类输出事实、假设、证据缺口、根因等级和排查链路；需求类输出 SRE runbook、待确认项、完成证据和处理链路。
+9. 排查类仅在根因确认时附带完整回复；精确自助入口可生成不宣称已完成的可粘贴指引；需求类在规划阶段只输出不可发送的完成后模板，取得执行与验证证据后才转为可发送草稿。
 
 ### 可选代码证据
 
