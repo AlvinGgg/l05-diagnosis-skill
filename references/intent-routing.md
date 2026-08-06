@@ -38,6 +38,8 @@ Record a structured `intent_assessment` in `case-summary.json`:
   `verified_complete`, or `rolled_back`.
 - `supporting_signals`, `counter_signals`, and
   `pending_confirmations` with exact safe Jira provenance.
+- `request_summary` with the description-first requester ask, symptom or goal,
+  safe target identity, environment comparison, and safe description evidence.
 
 This assessment is derived evidence. Keep it out of `issue.normalized.json`,
 which represents collected Jira facts.
@@ -46,11 +48,19 @@ which represents collected Jira facts.
 
 Use:
 
-1. the latest explicit requester outcome or acceptance condition;
-2. Jira description symptoms, desired state, target, and environment;
-3. relevant current requester comments;
+1. Jira description symptoms, desired state, target, and environment as the
+   baseline request record;
+2. a latest requester comment only when it explicitly corrects a baseline
+   field or supplies a newer outcome or acceptance condition;
+3. other relevant current requester comments;
 4. issue type and mapped semantic fields;
 5. historical precedent only for terminology or procedure.
+
+Keep the description-derived requester ask, symptom, exact safe API/Job/Host
+locator, and environment comparison visible in `request_summary` even after a
+later comment changes the route. A routine status or resolution comment cannot
+replace that baseline. An explicit correction may replace only the corrected
+target, and its provenance must remain visible.
 
 Issue type, assignee, priority, status, labels, and one user-selected category
 are auxiliary signals. None can decide intent alone.
@@ -139,6 +149,23 @@ Put `sre_precheck` in the SRE runbook. Do not transfer internal verification to
 the requester.
 
 ## Route behavior
+
+### Exact self-service or automation route
+
+After intent assessment and before generic Provider work, query the Vault
+router and approved entry-guide source for a documented self-service route.
+Select it only when a single entry has a specific overlap with the current
+target, error/symptom, or required service; a broad title or product keyword is
+not enough. Its Service Desk link must use the current Jira host. Prefer this
+route to manual SRE intervention when it lets the requester resolve the
+documented scenario.
+
+The requester draft must contain the approved entry link, required inputs,
+documented verification, and a failure fallback. It must say that no manual SRE
+action is planned initially, without claiming the automation has completed.
+Record the source and `not_run` Provider decision in the handling trail. Resume
+normal diagnosis only when the entry submission or its documented verification
+fails.
 
 ### Problem investigation
 

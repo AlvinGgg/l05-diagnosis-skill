@@ -114,8 +114,14 @@ Web Clipper templates support a configurable Note location and custom page varia
 - General documents: `inbox/documents/`
 - Manually clipped tickets: `inbox/tickets/`
 - Structured Jira candidates explicitly published by L05: `inbox/jira/`
+- Human-curated supplemental knowledge explicitly retained while handling a
+  ticket: `inbox/ticket-additional-knowledge/`
 
 Do not place new content directly under `raw/` or `wiki/`. Inbox is the review boundary.
+Supplemental knowledge is not a structured Jira Bundle or current Jira fact;
+record its issue key, capture date, human provenance, fact/inference boundary,
+and evidence gaps, and keep it `needs-review` until the Vault's review flow
+accepts it.
 
 ### 7. Ask the Obsidian Agent to organize content
 

@@ -14,15 +14,35 @@ The Core contains no Provider endpoint, field alias, resource catalog, Tenant, J
 ## Invocation order
 
 1. Collect and validate current Jira facts.
-2. Understand the issue and classify its problem type.
-3. Match Profile Provider selectors against the current problem type, text, and components.
-4. Discover the matching local Manifest.
-5. Send one `l05-provider-request/v1` object over stdin without a shell.
-6. Validate `l05-provider-response/v1`, remove exact known secret values, and merge Evidence Records and gaps.
+2. Derive the description-first request summary, understand the issue, and classify its problem type.
+3. Select one concrete evidence question and a safe locator that could support,
+   contradict, or narrow it.
+4. Match Profile Provider selectors against the current problem type, request
+   evidence, and components. Exclude automation/system comments and comments
+   that merely describe a completed or recommended release/configuration.
+5. Discover the matching local Manifest.
+6. Send one `l05-provider-request/v1` object over stdin without a shell,
+   including the bound evidence question and locator.
+7. Validate `l05-provider-response/v1`, remove exact known secret values, and merge Evidence Records and gaps.
 
 The default report includes each sanitized Evidence Record `data` block so the Agent can continue diagnosis even when the temporary Case is deleted. Providers must therefore complete all redaction before stdout; raw logs remain prohibited.
 
 Jira collection failure stops before Provider discovery. Missing, timed-out, malformed, or blocked Providers create Evidence Gaps and do not disable unrelated diagnosis branches.
+
+If no concrete evidence question and safe locator are available, defer the
+Provider with `missing_evidence_question` rather than inventing a broad query.
+
+A CI capability is eligible only when the evidence contains an exact Jenkins
+Job/Build URL, Task ID, or Build ID. Generic words such as `发布` or `release`,
+especially in a resolution comment, must not invoke or defer a CI Provider as
+though they were current execution evidence. If the issue is otherwise a CI
+case but has no exact locator, record a bounded `missing_exact_locator` gap and
+ask for that locator instead of broadening Provider access.
+
+When an exact approved self-service route has already matched the current
+scenario, defer generic Providers with a visible `not_run` handling-trail step.
+Run an explicit Evidence Plan only when the caller specifically requests it;
+do not let it masquerade as the self-service deferral.
 
 Loki is excluded from this generic auto-invocation loop. It requires a
 validated `l05-evidence-plan/v1` after a concrete hypothesis exists.
@@ -42,8 +62,10 @@ Use the independent `l05-kubectl-provider` for current Kubernetes evidence. Its
 installer must pin the approved kubeconfig path in a locked private local
 policy, and the runtime must pass that path explicitly on every kubectl call.
 The Core, Profile, Jira content, and Provider request must not supply
-kubeconfig, context, server, identity, TLS, command, argument, selector,
-template, or raw API overrides.
+kubeconfig, context, server, TLS, command, argument, template, or raw API
+overrides. Core may supply only a canonical cluster alias plus one typed
+resource target, or a typed Kubernetes Locator containing an optional
+Namespace and exactly one Pod, Workload, or Application identity.
 
 The Kubernetes Provider may return only projected Ingress, Service,
 EndpointSlice, Workload, Pod, Event, bounded-log, and RBAC-summary evidence.
@@ -66,15 +88,38 @@ The Kubernetes Provider also exposes two narrow Loki-support capabilities:
 Neither capability may return arbitrary labels, raw Kubernetes objects,
 Secrets, kubeconfig details, or an operator-supplied URL.
 
+For a typed `namespace + kind + name` target, Pod status, Events, and owner
+Workload evidence read that target directly; they do not list or resolve an
+Ingress. Locator resolution follows a strict order: an explicit Namespace is
+a hard boundary; an exact Pod name without Namespace uses a bounded,
+structured all-Namespace metadata-name lookup; a Workload name uses bounded
+owner-reference or safe name-prefix matching; and Application lookup first
+queries Namespace objects with the fixed `application=<application>` label.
+Only one unique Namespace may proceed, and its bounded Pod query uses the same
+fixed label. Unlabeled Pods are never selected through an Application Locator.
+Each query is capped, and no-match or ambiguity is a gap, never evidence. A
+`k8s.pod.logs_excerpt` request may read logs only after this flow or an exact
+typed Pod target yields one Pod and one uniquely derived Container. It requires
+no route-level `logs.enabled` flag, accepts no caller log arguments, never
+follows a stream, and never fans out across every Pod in a Namespace. Multiple
+Pod or Container candidates remain an evidence gap. A
+Rancher Kubernetes resource observation or URL is offline locator input for
+this same Kubectl flow only; Core must not open the page in a browser, inspect
+it with a link tool, call a Rancher API, or authenticate. Rancher platform
+login/account/access/role issues are not Kubernetes resource evidence and
+require human SRE handling.
+
 ## Loki Provider boundary
 
 The independent `l05-loki-provider` owns HTTPS and LogQL construction. Core
 owns the evidence question, strict Evidence Plan, cluster resolution,
 dependency order, and case-wide budget.
 
-- The Kubectl Profile `routes[]` directory owns canonical cluster references
-  and cluster/environment/subscription keywords. The Loki Profile stores only
-  `gateways[]` entries containing an exact Kubectl `cluster_ref` and
+- The Core Profile `cluster_directory.routes[]` directory owns canonical
+  cluster references and Environment-for-SRE / Subscription matching, including
+  the default Azure and explicit Aliyun/ACK branch. Legacy Kubectl
+  `config.routes[]` is compatibility-only. The Loki Profile stores only
+  `gateways[]` entries containing an exact canonical `cluster_ref` and
   `gateway_url`. Loki never stores aliases, tenant, component mappings, label
   rules, LogQL, headers, or credentials. Ordered selector rules live only in
   the separate Core-owned component placement directory.
@@ -103,11 +148,15 @@ dependency order, and case-wide budget.
   `index/stats`, filtered with internally escaped literals, and stopped by a
   locked byte budget. Fixed `topk-api-status` aggregation may cover at most one
   hour in serial five-minute partitions and emits only final `apiId` counts.
-- A Kubectl-discovered candidate may receive only one fixed
+- A healthy Profile Gateway does not require Kubectl. A missing or unhealthy
+  Gateway may cause exactly one Kubectl discovery; its candidate may receive only one fixed
   `/loki/api/v1/labels` health probe over at most 60 seconds. The request must
   use a validated `tenantId = application`, and the Provider discards returned
   label names and values. Index, label projection, and log queries require an
-  authorized, backed-up, atomically written, reloaded Profile entry.
+  authorized, backed-up, atomically written, reloaded Profile entry. An
+  enterprise Profile may grant that local authorization with
+  `auto_gateway_reconciliation: true`; otherwise Core stops at the preview (or
+  requires the explicit CLI authorization).
 - Gateway health, selector resolution, index estimate, each log target, Kubectl identity/Gateway
   discovery, Profile reconciliation, no-match, block, and budget stop are
   separate handling-trail steps.

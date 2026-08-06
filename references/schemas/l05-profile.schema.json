@@ -16,6 +16,10 @@
     },
     "knowledge": {
       "type": "object",
+      "properties": {
+        "wiki_sources_general": {"$ref": "#/$defs/relativePath"},
+        "raw_files": {"$ref": "#/$defs/relativePath"}
+      },
       "additionalProperties": {
         "$ref": "#/$defs/relativePath"
       },
@@ -41,20 +45,32 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "domain": {"$ref": "#/$defs/stringArray"},
             "application": {"$ref": "#/$defs/stringArray"},
             "event_timestamp": {"$ref": "#/$defs/stringArray"},
             "request_type": {"$ref": "#/$defs/stringArray"},
             "question_classification": {"$ref": "#/$defs/stringArray"},
             "issue_category": {"$ref": "#/$defs/stringArray"},
             "environment": {"$ref": "#/$defs/stringArray"},
+            "namespace": {"$ref": "#/$defs/stringArray"},
             "request_id": {"$ref": "#/$defs/stringArray"},
             "source_environment": {"$ref": "#/$defs/stringArray"},
             "subscription": {"$ref": "#/$defs/stringArray"},
             "target_environment": {"$ref": "#/$defs/stringArray"}
           }
+        },
+        "field_value_paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "domain": {"$ref": "#/$defs/stringArray"},
+            "application": {"$ref": "#/$defs/stringArray"},
+            "namespace": {"$ref": "#/$defs/stringArray"}
+          }
         }
       }
     },
+    "cluster_directory": {"$ref": "#/$defs/clusterDirectory"},
     "code": {
       "type": "object",
       "additionalProperties": false,
@@ -289,6 +305,7 @@
       "additionalProperties": false,
       "required": ["gateways"],
       "properties": {
+        "auto_gateway_reconciliation": {"type": "boolean"},
         "gateways": {
           "type": "array",
           "maxItems": 100,
@@ -310,7 +327,6 @@
     "kubectlConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["routes"],
       "properties": {
         "routes": {
           "type": "array",
@@ -339,6 +355,43 @@
                     }
                   },
                   "match_mode": {"const": "any"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "clusterDirectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routes"],
+      "properties": {
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "match", "cluster_aliases"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "cluster_aliases": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "uniqueItems": true,
+                "items": {"$ref": "#/$defs/id"}
+              },
+              "match": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["environment", "subscription", "cloud"],
+                "properties": {
+                  "environment": {"$ref": "#/$defs/stringArray"},
+                  "subscription": {"$ref": "#/$defs/stringArray"},
+                  "cloud": {"enum": ["azure", "aliyun"]}
                 }
               }
             }

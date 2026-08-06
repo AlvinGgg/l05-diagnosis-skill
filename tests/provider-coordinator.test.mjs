@@ -446,6 +446,43 @@ test("authorized typed discovery adds a Gateway for a known canonical cluster be
   assert.equal(result.responses.at(-1).evidence_records.some((record) => record.capability === "loki.logs.query_excerpt"), true);
 });
 
+test("Profile opt-in automatically reconciles one validated missing Gateway", async () => {
+  const {root, providerDir} = fixture();
+  const profileFile = path.join(root, ".l05-profile.json");
+  const profile = JSON.parse(fs.readFileSync(profileFile, "utf8"));
+  profile.optional_evidence_providers[0].config.auto_gateway_reconciliation = true;
+  fs.writeFileSync(profileFile, JSON.stringify(profile));
+  const result = await executeEvidencePlan({
+    kbRoot: root,
+    issue: issue(),
+    evidencePlan: plan({cluster_alias: "example-new-qa"}),
+    providerDir,
+    timeoutMs: 5000,
+  });
+  assert.equal(result.status, "ok", JSON.stringify(result));
+  const updated = JSON.parse(fs.readFileSync(profileFile, "utf8"));
+  assert.equal(updated.optional_evidence_providers[0].config.gateways.at(-1).cluster_ref, "example-new-qa");
+  assert.equal(result.inspection_steps.some((step) => step.capability === "profile.loki_gateway.reconcile" && step.result === "updated"), true);
+});
+
+test("a healthy canonical Loki Profile route does not require Kubectl", async () => {
+  const {root, providerDir} = fixture();
+  const profileFile = path.join(root, ".l05-profile.json");
+  const profile = JSON.parse(fs.readFileSync(profileFile, "utf8"));
+  profile.optional_evidence_providers = profile.optional_evidence_providers.filter((entry) => entry.provider_id === "loki");
+  fs.writeFileSync(profileFile, JSON.stringify(profile));
+  fs.unlinkSync(path.join(providerDir, "kubectl.json"));
+  const result = await executeEvidencePlan({
+    kbRoot: root,
+    issue: issue(),
+    evidencePlan: plan(),
+    providerDir,
+    timeoutMs: 5000,
+  });
+  assert.equal(result.status, "ok", JSON.stringify(result));
+  assert.deepEqual(result.responses.map((response) => response.provider_id), ["loki"]);
+});
+
 test("known cluster without a Gateway stops after bounded Kubectl discovery and never calls Loki", async () => {
   const {root, providerDir} = fixture();
   const result = await executeEvidencePlan({

@@ -6,8 +6,9 @@ an investigation or request-fulfillment plan.
 ## Required Evidence Groups
 
 - Jira: issue key, summary, description signal, status, labels/components when available, relevant user comments, and updated timestamp. This group is mandatory before any diagnosis.
-- Intent: `work_intent`, delivery mode, confidence, supporting and counter-signals, planning/execution status, owner, and pending confirmations. This group is mandatory after Jira validates.
-- Obsidian: exact vault file paths read, including `wiki/` pages and `raw/tickets/` files when historical tickets influenced the answer.
+- Intent: `work_intent`, delivery mode, confidence, supporting and counter-signals, planning/execution status, owner, pending confirmations, and the description-first `request_summary` (ask, symptom/goal, safe target identity, structured Domain/Application/Namespace/Environment/Subscription fields when mapped, comparison, and description evidence). This group is mandatory after Jira validates.
+- Obsidian: exact vault file paths read, including `wiki/` pages, approved `raw/files/` entry guides when they select a self-service route, and `raw/tickets/` files when historical tickets influenced the answer.
+- Resolution channel: when a specifically matched approved self-service or automated entry can resolve the scenario, its source, safe entry URL, required inputs, verification, and failure fallback. This replaces generic manual SRE work only for that initial documented route.
 - Code: Repository, requested ref, resolved Commit, resolution basis, file path, symbol/config key, and whether the execution version was confirmed. For an explicitly enabled local Repository, also record branch and dirty/sync state.
 - Browser: URL/page state only when Chrome/browser evidence was used.
 - Kubernetes: Provider capability, safe context alias, Namespace, Kind/Name, resource version or collection time, projected fields, RBAC/TLS state, truncation/redaction, and gaps. Never include a kubeconfig, raw object, Secret, endpoint address list, or unredacted log.
@@ -26,6 +27,7 @@ an investigation or request-fulfillment plan.
 
 - If Jira facts are unavailable, produce only a blocked result. Do not include Obsidian/code/browser claims or a preliminary diagnosis.
 - Create the intent assessment before Vault, Provider, code, browser, runtime, or web evidence. If intent is `unclear`, return the requester-information draft and stop.
+- Treat the Jira description as the baseline request record. A later comment can replace a target only with an explicit correction and must not remove the description-derived target or comparison from the evidence record.
 - Tie every non-obvious diagnosis claim to at least one evidence group.
 - Separate observed fact from inference.
 - Mark historical-ticket lessons as precedent unless current docs or code confirm them.
@@ -41,6 +43,7 @@ an investigation or request-fulfillment plan.
   Loki observation remains evidence; it cannot by itself promote root cause or
   fulfillment status.
 - Generate a ready-to-paste troubleshooting reply only for a `confirmed` root cause. A consultation reply may be generated when authoritative documentation or current code supports the guidance. Both must distinguish completed actions and observed verification from recommendations and pending verification.
+- An exact approved self-service entry is a separate reply gate: generate a ready-to-paste requester instruction containing the entry link, required inputs, verification, and failure fallback. Do not call it a root-cause finding, automated completion, or SRE-performed action. Record generic Provider work as `not_run` unless an explicit Evidence Plan was requested.
 - For fulfillment, distinguish `requester_input`, `sre_precheck`, `approval_input`, and `evidence_gap`. Ask the requester only for information they reasonably own; keep internal current-state checks in the SRE runbook.
 - A fulfillment runbook must include target/exclusions, current-state snapshot, evidence-backed steps, stop conditions, validation, rollback, and completion evidence. Documentation proves supported product behavior, not current production state.
 - While `execution_status=not_executed`, label the completion reply as a template that is not ready to paste. Use completed tense only for actions and validation proven by current execution evidence.

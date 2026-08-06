@@ -11,6 +11,12 @@ Initialize a new empty Vault with `scripts/l05_setup.py init`, update the
 private configuration, validate the Vault Profile, and rerun `doctor`. Do not
 handle a real case until it returns `ready`.
 
+When Kubectl is configured, review `doctor`'s Provider capability drift and
+Kubernetes Locator migration warnings as part of readiness. A ready result
+should include the `k8s.pod.anomalies` capability, the CMDB child-value
+mapping, and a Profile `cluster_directory` before Application-only discovery
+is used.
+
 ## Required configuration
 
 - `JIRA_BASE_URL`: Jira site URL.
@@ -42,6 +48,25 @@ The internal Schema is `references/schemas/l05-profile.schema.json`; users norma
 
 Missing Repository entries only limit automatic code routing. Invalid Profile JSON, unsafe paths, unknown routing targets, or secret-shaped fields must be fixed before the Profile is used.
 
+### Retrieval paths and approved entry guides
+
+New Profiles include `knowledge.wiki_sources_general` for top-level curated
+Source pages and `knowledge.raw_files` for immutable source documents such as
+an approved automation-entry guide. Keep both values Vault-relative and
+non-secret. The Core may resolve an explicit `wiki/sources/...` link in
+`index.md` even when a legacy Profile does not list the top-level Source folder,
+so an existing Vault remains readable without a forced Profile rewrite.
+
+`doctor` emits `indexed_source_outside_search_paths:<path>` when the index
+links an existing Source page outside the configured Source paths. It is a
+read-only warning, not permission to change the Vault automatically: review the
+source and add its logical path to the private Profile only when it is intended
+for normal retrieval. Raw entry-guide material must come from a configured
+`raw_files` path or be paired with an index-linked Source page, and must supply
+an exact, safe self-service match before it can defer SRE work. Its Service
+Desk URL must be HTTPS on the current Jira host; a broad keyword or generic
+portal link is insufficient.
+
 ### Optional Jira semantic field mappings
 
 Map organization custom field IDs or names to public semantic slots without
@@ -51,6 +76,8 @@ putting organization identifiers in the Skill:
 {
   "jira": {
     "field_mappings": {
+      "domain": ["Domain Application"],
+      "application": ["Domain Application"],
       "request_type": ["customfield_12345"],
       "question_classification": ["Question Classification"],
       "issue_category": ["customfield_67890"],
@@ -60,12 +87,34 @@ putting organization identifiers in the Skill:
 }
 ```
 
-Allowed slots are `application`, `event_timestamp`, `request_type`,
+Allowed slots are `domain`, `application`, `event_timestamp`, `request_type`,
 `question_classification`, `issue_category`, `environment`, `request_id`,
-`source_environment`, `subscription`, and `target_environment`. Selectors must
+`namespace`, `source_environment`, `subscription`, and `target_environment`. Selectors must
 be unique, non-empty strings. These mappings are auxiliary intent and Evidence
 Plan signals; explicit user environment information takes precedence, and no
 mapping proves root cause or current configuration.
+
+For Jira option-with-child fields, add
+`field_value_paths` so the parent and child meanings cannot be confused:
+
+```json
+{
+  "jira": {
+    "field_mappings": {
+      "domain": ["Domain Application"],
+      "application": ["Domain Application"]
+    },
+    "field_value_paths": {
+      "domain": ["value"],
+      "application": ["child.value"]
+    }
+  }
+}
+```
+
+The Core treats `child.value` as the Application for this field and never
+falls back to the parent `value` for Kubernetes lookup. A private Profile may
+use other safe dotted paths for organization-specific structured fields.
 
 ## Optional Evidence Providers
 
@@ -78,34 +127,63 @@ it accepts only the kubeconfig path pinned by its installer in a private local
 policy, stores the non-secret locked policy at
 `~/.codex/l05-diagnosis/kubectl-policy.json`, and exposes no kubeconfig
 override. Keep context names and Namespace allowlists in that `0600` policy.
-The Vault Profile may contain only canonical cluster-level route keywords and
-a `cluster_alias`. It must not contain Namespace/Application/business hints,
-kubeconfig, context, server, identity, TLS, command, argument, selector,
-template, or raw API override fields.
+Cluster selection belongs to the Profile's top-level `cluster_directory`, not
+to the Kubectl Provider. It combines current `Environment for SRE` and
+`Subscription`, defaults to Azure, and uses an explicit `aliyun` branch only
+for Aliyun/ACK tickets. Each rule may name at most two approved canonical
+aliases; the locked Kubectl policy remains the only alias-to-private-context
+mapping.
 
 ```json
 {
-  "provider_id": "kubectl",
-  "enabled": true,
-  "capabilities": ["k8s.context.health", "k8s.loki_gateway.resolve"],
-  "match": {
-    "problem_types": ["gateway.*", "kubernetes.*"],
-    "match_mode": "any"
-  },
-  "config": {
+  "cluster_directory": {
     "routes": [
       {
         "id": "example-qa",
         "match": {
-          "keywords": ["example-qa", "example-subscription"],
-          "match_mode": "any"
+          "environment": ["qa"],
+          "subscription": ["example-subscription"],
+          "cloud": "azure"
         },
-        "cluster_alias": "example-qa"
+        "cluster_aliases": ["example-qa"]
       }
     ]
   }
 }
 ```
+
+The Kubectl Provider config is normally empty. It must not contain
+Namespace/Application/business hints, kubeconfig, context, server, identity,
+TLS, command, argument, selector, template, or raw API override fields.
+Legacy `config.routes` is accepted only to keep existing Profiles working while
+they migrate to `cluster_directory`.
+
+```json
+{
+  "provider_id": "kubectl",
+  "enabled": true,
+  "capabilities": ["k8s.context.health", "k8s.pod.anomalies", "k8s.pod.logs_excerpt", "k8s.loki_gateway.resolve"],
+  "match": {
+    "problem_types": ["gateway.*", "kubernetes.*"],
+    "match_mode": "any"
+  },
+  "config": {}
+}
+```
+
+For a Rancher Kubernetes observation or resource URL, Core extracts only safe
+locator text and calls the same Kubectl Provider. It never opens Rancher in a
+browser, inspects it as a link, calls the Rancher API, or authenticates.
+Rancher login, account, authorization, role, project, or cluster-control-plane
+permission requests are an SRE handoff instead. Locator resolution follows
+this order: an explicit Namespace is a hard boundary; an exact Pod name uses a
+structured all-Namespace `metadata.name` lookup when Namespace is absent; a
+Workload name uses bounded owner-reference or safe `<workload>-` name matching;
+and an Application request first selects Namespace objects with the fixed
+`application=<application>` label, requires one unique Namespace, then selects
+only Pods in that Namespace with the same fixed label. It never falls back to
+unlabeled Pods. Each query is capped and structured (the implementation does
+not execute shell `grep`), and no-match/ambiguous candidates are not evidence.
 
 ### Loki Provider Profile
 
@@ -128,6 +206,7 @@ The Vault Profile contains only the cluster/Gateway directory:
     "match_mode": "any"
   },
   "config": {
+    "auto_gateway_reconciliation": true,
     "gateways": [
       {
         "cluster_ref": "example-qa",
@@ -166,8 +245,8 @@ placement is a separate Core-owned Profile section:
 }
 ```
 
-Each placement must reference a canonical cluster already present in Kubectl
-`config.routes`. Selector candidates are tried in order after Loki reports the
+Each placement must reference a canonical cluster already present in
+`cluster_directory` (or a legacy Kubectl route while migrating). Selector candidates are tried in order after Loki reports the
 tenant's keys for the exact query window. `log_identity` is a value such as an
 API name derived from a URL or Jira evidence; the Evidence Plan cannot choose
 the label. A `fixed` value is allowed only in this private enterprise component
@@ -177,7 +256,11 @@ Provider process. The placement is not part of Kubectl routing or Loki Gateway
 config.
 
 If a cluster entry is missing or stale, Core may perform one locked Kubectl
-Gateway discovery and one fixed readiness check. Preview reconciliation with:
+Gateway discovery and one fixed readiness check. With
+`auto_gateway_reconciliation: true`, Core applies the resulting single-entry
+update only after fresh matching evidence, backup, atomic write, validation,
+and reload. With the switch absent or false, it stops at the auditable preview
+unless the operator explicitly uses:
 
 ```bash
 python3 scripts/l05_profile.py reconcile-loki-gateway \

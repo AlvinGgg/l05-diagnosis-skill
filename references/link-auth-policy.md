@@ -13,4 +13,9 @@ Valid statuses are `not_attempted`, `accessible`, `login_required`,
   `login_required`, not accessible evidence.
 - Inspect only links that can verify/falsify a current hypothesis. Optional link
   failure records a gap and does not fabricate a checked result.
+- Rancher Kubernetes observations and resource URLs are not eligible for link
+  or browser inspection. Treat them only as offline locator text and continue
+  through the read-only Kubectl Provider. Never open the Rancher page, call its
+  API, or authenticate. Rancher platform login/account/authorization/role
+  issues stop for human SRE handling.
 - Use `scripts/link_inspector.py` for offline URL and response classification.

@@ -11,6 +11,7 @@ import {
   loadProfile,
   profileProviderEntries,
 } from "./provider-loader.mjs";
+import {resolveProfileCluster} from "./cluster-directory.mjs";
 
 const execFileAsync = promisify(execFile);
 const PLAN_SCHEMA = "l05-evidence-plan/v1";
@@ -449,9 +450,6 @@ export async function executeEvidencePlan({
   if (!lokiEntry || !lokiManifest) {
     return {status: "blocked", responses: [], gaps: ["loki_provider_not_available"], inspection_steps: [], budget: null};
   }
-  if (!kubectlEntry) {
-    return {status: "blocked", responses: [], gaps: ["kubectl_cluster_directory_not_available"], inspection_steps: [], budget: null};
-  }
   const aggregationTarget = plan.targets.find((target) => target.aggregation !== undefined);
   const requiredCapabilities = aggregationTarget
     ? ["loki.gateway.health", "loki.stream.selector.resolve", "loki.logs.topk_api_status"]
@@ -468,6 +466,7 @@ export async function executeEvidencePlan({
   const budgetLimits = budgetFromPlan(plan);
   const ledger = {log_queries: 0, tenants: new Set(), scan_bytes: 0, entries: 0};
   let profileReconciled = false;
+  const profileAutoReconciliation = lokiEntry.config?.auto_gateway_reconciliation === true;
   const placements = profile?.observability?.component_log_placements || [];
   const placementsByTarget = new Map();
   for (const target of plan.targets) {
@@ -478,7 +477,7 @@ export async function executeEvidencePlan({
       placements,
       target.application,
       plan.cluster_alias,
-      kubectlEntry.config?.routes,
+      kubectlEntry?.config?.routes || [],
     );
     if (placement.status !== "matched") {
       const gap = placement.status === "ambiguous"
@@ -494,11 +493,27 @@ export async function executeEvidencePlan({
   if (placementClusterRefs.size > 1) {
     return {status: "blocked", responses, gaps: ["component_log_placement_conflict"], inspection_steps: inspectionSteps, budget: null};
   }
-  const clusterResolution = placementClusterRefs.size
+  let clusterResolution = placementClusterRefs.size
     ? {status: "matched", cluster_ref: [...placementClusterRefs][0]}
-    : resolveKubectlCluster(kubectlEntry.config?.routes, plan.cluster_alias);
+    : resolveProfileCluster({
+      profile,
+      kubectlEntry,
+      issue,
+      environmentSignal: plan.cluster_alias,
+    });
+  // A canonical cluster reference already present in the Loki Profile is a
+  // sufficient route for a healthy Profile Gateway.  Do not make a Loki-only
+  // read path depend on a Kubectl installation just to rediscover that alias.
+  if (clusterResolution.status !== "matched" && ID_PATTERN.test(plan.cluster_alias)
+    && resolveLokiGateway(lokiEntry.config?.gateways, plan.cluster_alias).status === "matched") {
+    clusterResolution = {status: "matched", cluster_ref: plan.cluster_alias};
+  }
   if (clusterResolution.status !== "matched") {
-    const gap = clusterResolution.status === "ambiguous" ? "cluster_route_ambiguous" : "cluster_route_unmapped";
+    const gap = clusterResolution.status === "ambiguous"
+      ? "cluster_route_ambiguous"
+      : clusterResolution.status === "candidates"
+        ? "cluster_route_candidates"
+        : "cluster_route_unmapped";
     return {status: "blocked", responses, gaps: [gap], inspection_steps: inspectionSteps, budget: null};
   }
   const clusterRef = clusterResolution.cluster_ref;
@@ -565,7 +580,7 @@ export async function executeEvidencePlan({
     const reconciliation = await applyGatewayReconciliation({
       kbRoot,
       evidence: reconciliationEvidence,
-      apply: authorizeProfileUpdate,
+      apply: authorizeProfileUpdate || profileAutoReconciliation,
     });
     inspectionSteps.push({
       status: reconciliation.status === "updated" || reconciliation.status === "no_change" ? "completed" : "blocked",
@@ -574,7 +589,7 @@ export async function executeEvidencePlan({
       result: reconciliation.status,
       diff_fingerprint: reconciliation.new_gateway_fingerprint,
     });
-    if (!authorizeProfileUpdate || reconciliation.status !== "updated") {
+    if (!(authorizeProfileUpdate || profileAutoReconciliation) || reconciliation.status !== "updated") {
       gaps.push(reconciliation.reason || "gateway_profile_update_required");
       return null;
     }

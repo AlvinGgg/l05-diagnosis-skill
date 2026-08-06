@@ -58,18 +58,19 @@ For problem investigation use these sections in order:
 2. Ticket facts
 3. Intent assessment
 4. Timeline
-5. Local KB matches and freshness
-6. Investigation trail
-7. Evidence inspected
-8. Hypotheses with supporting and contradicting evidence
-9. Root cause assessment for troubleshooting: `confirmed`, `probable`,
+5. Recommended resolution channel, when an exact self-service route exists
+6. Local KB matches and freshness
+7. Investigation trail
+8. Evidence inspected
+9. Hypotheses with supporting and contradicting evidence
+10. Root cause assessment for troubleshooting: `confirmed`, `probable`,
    `unresolved`, or `blocked`; guidance assessment for consultation:
    `supported`, `conditional`, or `unresolved`
-10. Recommended change
-11. Verification plan
-12. Access and evidence gaps
-13. Optional KB publish result
-14. Jira reply draft, when the reply gate below is satisfied
+11. Recommended change
+12. Verification plan
+13. Access and evidence gaps
+14. Optional KB publish result
+15. Jira reply draft, when the reply gate below is satisfied
 
 Every non-obvious claim cites a Jira field/comment, bundle path, KB path, code
 path/branch, attachment, link, browser page, or runtime command. Never promote
@@ -108,6 +109,11 @@ Classify the ticket before drafting:
 - **Troubleshooting**: generate a reply only when current evidence confirms the
   causal chain. A historical match, an untested hypothesis, or a proposed
   change is not enough.
+- **Exact self-service / automation**: when an approved entry specifically
+  matches the current scenario, generate a ready-to-paste requester instruction
+  with the entry, required inputs, documented verification, and failure
+  fallback. State that manual SRE handling is deferred, not that automation is
+  complete. Do not expose the local Vault path.
 - **Consultation**: generate a reply when authoritative documentation or
   current code supports the general answer. Ticket-specific values may remain
   open, but they must be labelled as inputs needed for an exact change.
@@ -189,16 +195,18 @@ Use these sections in order:
 1. Intent assessment
 2. Current status
 3. Request target and scope
-4. Current evidence and pending confirmations
-5. Requester information draft, only for `requester_input`
-6. SRE handling runbook
-7. User-side coordination, only when required
-8. Risks, approval, and rollback
-9. Completion criteria and evidence
-10. Post-completion Jira reply draft
-11. Handling trail and references
-12. Access and evidence gaps
-13. Optional KB publish result
+4. Recommended resolution channel, when an exact self-service route exists
+5. Current evidence and pending confirmations
+6. Requester information draft, only for `requester_input`
+7. Ready-to-paste self-service requester draft, when applicable
+8. SRE fallback handling runbook, only when the self-service route fails; otherwise SRE handling runbook
+9. User-side coordination, only when required
+10. Risks, approval, and rollback
+11. Completion criteria and evidence
+12. Post-completion Jira reply draft
+13. Handling trail and references
+14. Access and evidence gaps
+15. Optional KB publish result
 
 The runbook must identify target and exclusions, prechecks, the recoverable
 current-state snapshot, evidence-backed steps, stop conditions, positive and

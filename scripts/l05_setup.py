@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -35,6 +36,7 @@ DIRECTORIES = (
     "inbox/jira",
     "raw/documents",
     "raw/tickets",
+    "raw/files",
     "wiki/sources/documents",
     "wiki/sources/tickets",
     "wiki/sources/jira",
@@ -198,6 +200,87 @@ def discover_provider_ids(directory: Path = DEFAULT_PROVIDER_DIR) -> set[str]:
     return providers
 
 
+def provider_capability_drift(directory: Path, profile: dict[str, object] | None) -> list[str]:
+    """Report configured Provider capability drift without exposing commands or paths."""
+    if not profile or not isinstance(profile.get("optional_evidence_providers"), list):
+        return []
+    configured = {
+        item.get("provider_id"): set(item.get("capabilities", []))
+        for item in profile["optional_evidence_providers"]
+        if isinstance(item, dict) and item.get("enabled", True) and isinstance(item.get("provider_id"), str)
+    }
+    warnings: list[str] = []
+    for manifest_file in directory.glob("*.json") if directory.is_dir() else []:
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        provider_id = manifest.get("provider_id")
+        if provider_id not in configured or not isinstance(manifest.get("capabilities"), list):
+            continue
+        actual = set(manifest["capabilities"])
+        for capability in sorted(configured[provider_id] - actual):
+            warnings.append(f"provider_capability_missing_in_manifest:{provider_id}:{capability}")
+        command = manifest.get("command")
+        script = next((Path(value) for value in command[1:] if isinstance(value, str) and value.endswith((".py", ".mjs")) and Path(value).is_file()), None) if isinstance(command, list) else None
+        template = script.parent.parent / "provider-manifest.template.json" if script else None
+        if not template or not template.is_file():
+            continue
+        try:
+            expected_manifest = json.loads(template.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        expected = set(expected_manifest.get("capabilities", [])) if isinstance(expected_manifest.get("capabilities"), list) else set()
+        for capability in sorted(expected - actual):
+            warnings.append(f"provider_manifest_stale:{provider_id}:{capability}")
+        for capability in sorted(actual - expected):
+            warnings.append(f"provider_manifest_extra_capability:{provider_id}:{capability}")
+    kubectl = configured.get("kubectl")
+    if kubectl:
+        jira = profile.get("jira", {}) if isinstance(profile.get("jira"), dict) else {}
+        mappings = jira.get("field_mappings", {}) if isinstance(jira.get("field_mappings"), dict) else {}
+        paths = jira.get("field_value_paths", {}) if isinstance(jira.get("field_value_paths"), dict) else {}
+        shared_structured_selectors = set(mappings.get("domain") or []) & set(mappings.get("application") or [])
+        if shared_structured_selectors and (
+            not paths.get("domain")
+            or not paths.get("application")
+            or set(paths.get("domain") or []) == set(paths.get("application") or [])
+        ):
+            warnings.append("profile_kubernetes_locator_migration_incomplete:structured_application_mapping")
+        if not isinstance(profile.get("cluster_directory"), dict):
+            warnings.append("profile_kubernetes_locator_migration_incomplete:cluster_directory")
+        if "k8s.pod.anomalies" not in kubectl:
+            warnings.append("provider_capability_missing_in_profile:kubectl:k8s.pod.anomalies")
+    return sorted(set(warnings))
+
+
+def indexed_source_search_warnings(vault: Path, profile: dict[str, object]) -> list[str]:
+    knowledge = profile.get("knowledge", {})
+    if not isinstance(knowledge, dict):
+        return []
+    index_relative = knowledge.get("index")
+    if not isinstance(index_relative, str):
+        return []
+    index = vault / index_relative
+    if not index.is_file():
+        return []
+    roots = [
+        knowledge.get(key)
+        for key in ("wiki_sources_general", "wiki_sources_documents", "wiki_sources_tickets", "wiki_sources_jira")
+        if isinstance(knowledge.get(key), str)
+    ]
+    warnings: list[str] = []
+    pattern = re.compile(r"\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]|\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)")
+    for match in pattern.finditer(index.read_text(encoding="utf-8", errors="replace")):
+        raw = (match.group(1) or match.group(2) or "").strip().removeprefix("./")
+        relative = raw if raw.endswith(".md") else f"{raw}.md"
+        if not relative.startswith("wiki/sources/") or not (vault / relative).is_file():
+            continue
+        if not any(relative == root or relative.startswith(f"{root.rstrip('/')}/") for root in roots):
+            warnings.append(f"indexed_source_outside_search_paths:{relative}")
+    return sorted(set(warnings))
+
+
 def initialize(args: argparse.Namespace) -> int:
     vault = Path(args.vault).expanduser().resolve()
     if vault.exists() and not vault.is_dir():
@@ -328,6 +411,7 @@ def doctor(args: argparse.Namespace) -> int:
         expected_directories = tuple(
             dict.fromkeys(value for key, value in knowledge.items() if key not in ("contract", "index"))
         )
+        warnings.extend(indexed_source_search_warnings(vault, profile))
     else:
         expected_files = CORE_FILES
         expected_directories = DIRECTORIES
@@ -361,6 +445,16 @@ def doctor(args: argparse.Namespace) -> int:
     installed_provider_ids = discover_provider_ids()
     missing_provider_ids = sorted(configured_provider_ids - installed_provider_ids)
     warnings.extend(f"provider_not_installed:{provider_id}" for provider_id in missing_provider_ids)
+    capability_drift = provider_capability_drift(DEFAULT_PROVIDER_DIR, profile if profile_validation["valid"] else None)
+    warnings.extend(capability_drift)
+    capability_blockers = [item for item in capability_drift if item.startswith((
+        "provider_capability_missing_in_manifest:",
+        "provider_manifest_stale:",
+        "provider_manifest_extra_capability:",
+        "profile_kubernetes_locator_migration_incomplete:",
+        "provider_capability_missing_in_profile:",
+    ))]
+    blockers.extend(capability_blockers)
 
     setup_actions = []
     if not configured_vault:
@@ -448,6 +542,14 @@ def doctor(args: argparse.Namespace) -> int:
                 "Install Node.js 18 or newer, then rerun doctor.",
             )
         )
+    if capability_blockers:
+        setup_actions.append(
+            setup_action(
+                "repair_provider_capability_drift",
+                "verification",
+                "Synchronize the configured Profile and installed Provider Manifest with the current Provider template, then rerun doctor.",
+            )
+        )
 
     configuration_chain = [
         {
@@ -515,6 +617,7 @@ def doctor(args: argparse.Namespace) -> int:
             "configured": sorted(configured_provider_ids),
             "installed": sorted(installed_provider_ids),
             "missing": missing_provider_ids,
+            "capability_drift": capability_drift,
         },
         "tools": tools,
         "blockers": blockers,

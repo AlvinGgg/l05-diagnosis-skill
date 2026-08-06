@@ -9,6 +9,7 @@ import sys
 import urllib.parse
 
 LOGIN_RE = re.compile(r"(?i)(sign[ -]?in|log[ -]?in|sso|authentication required)")
+RANCHER_HOST_RE = re.compile(r"(^|\.)rancher(?:[-.]|$)", re.IGNORECASE)
 
 def classify_url(url: str) -> dict[str, str]:
     try:
@@ -18,6 +19,8 @@ def classify_url(url: str) -> dict[str, str]:
     if parsed.scheme not in {"http", "https"}:
         return {"url": url, "access_status": "blocked_by_policy"}
     host = (parsed.hostname or "").lower()
+    if RANCHER_HOST_RE.search(host):
+        return {"url": redact_url(url), "access_status": "blocked_by_policy"}
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
         return {"url": url, "access_status": "blocked_by_policy"}
     try:

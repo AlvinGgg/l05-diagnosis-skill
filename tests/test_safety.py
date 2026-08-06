@@ -14,11 +14,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from fetch_jira_issue import load_missing_l05_env, load_missing_zshrc_env
 from inspect_github_actions import inspect, parse_actions_url
 from l05_profile import reconcile_loki_gateway, validate_profile
+from l05_setup import provider_capability_drift
 from link_inspector import classify_response, classify_url, redact_url
 from safe_preview import preview
 
 
 class SafetyTests(unittest.TestCase):
+    def test_doctor_detects_unmigrated_kubernetes_locator_profile(self):
+        profile = {
+            "jira": {
+                "field_mappings": {"domain": ["Domain Application"], "application": ["Domain Application"]},
+                "field_value_paths": {},
+            },
+            "optional_evidence_providers": [{
+                "provider_id": "kubectl",
+                "enabled": True,
+                "capabilities": ["k8s.pod.anomalies"],
+            }],
+        }
+        warnings = provider_capability_drift(Path("/does/not/exist"), profile)
+        self.assertIn("profile_kubernetes_locator_migration_incomplete:structured_application_mapping", warnings)
+        self.assertIn("profile_kubernetes_locator_migration_incomplete:cluster_directory", warnings)
+
+    def test_doctor_detects_installed_manifest_capability_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "provider"
+            scripts = package / "scripts"
+            scripts.mkdir(parents=True)
+            script = scripts / "provider.py"
+            script.write_text("# fixture\n", encoding="utf-8")
+            (package / "provider-manifest.template.json").write_text(json.dumps({"capabilities": ["k8s.pod.anomalies", "k8s.pod.status"]}), encoding="utf-8")
+            (root / "kubectl.json").write_text(json.dumps({"provider_id": "kubectl", "command": ["python3", str(script)], "capabilities": ["k8s.pod.status"]}), encoding="utf-8")
+            profile = {"optional_evidence_providers": [{"provider_id": "kubectl", "enabled": True, "capabilities": ["k8s.pod.anomalies"]}]}
+            warnings = provider_capability_drift(root, profile)
+            self.assertIn("provider_capability_missing_in_manifest:kubectl:k8s.pod.anomalies", warnings)
+            self.assertIn("provider_manifest_stale:kubectl:k8s.pod.anomalies", warnings)
+
     def test_fetcher_prefers_private_l05_config_over_zshrc(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -51,6 +83,11 @@ class SafetyTests(unittest.TestCase):
     def test_local_and_metadata_links_are_blocked(self):
         self.assertEqual(classify_url("http://127.0.0.1/admin")["access_status"], "blocked_by_policy")
         self.assertEqual(classify_url("http://169.254.169.254/latest/meta-data")["access_status"], "blocked_by_policy")
+
+    def test_rancher_resource_links_are_blocked_from_generic_inspection(self):
+        result = classify_url("https://rancher.example.test/explorer/pod?q=gi-fund&token=private-value")
+        self.assertEqual(result["access_status"], "blocked_by_policy")
+        self.assertNotIn("private-value", result["url"])
 
     def test_sensitive_query_values_are_redacted(self):
         value = redact_url("https://example.test/path?token=secret-value&view=1")
@@ -114,7 +151,7 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(first.returncode, 0, first.stderr)
             result = json.loads(first.stdout)
             self.assertEqual(result["status"], "initialized")
-            for relative in ["AGENTS.md", "START_HERE.md", "index.md", "log.md", ".l05-profile.json", "inbox/documents", "inbox/tickets", "inbox/jira", "raw/documents", "raw/tickets", "wiki/sources/documents", "wiki/sources/tickets", "system/templates/source.md"]:
+            for relative in ["AGENTS.md", "START_HERE.md", "index.md", "log.md", ".l05-profile.json", "inbox/documents", "inbox/tickets", "inbox/jira", "raw/documents", "raw/tickets", "raw/files", "wiki/sources", "wiki/sources/documents", "wiki/sources/tickets", "system/templates/source.md"]:
                 self.assertTrue((vault / relative).exists(), relative)
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
             self.assertNotIn("JIRA_TOKEN=", first.stdout)
@@ -180,6 +217,73 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(report["setup_actions"], [])
             self.assertTrue(all(item["complete"] for item in report["configuration_chain"]))
             self.assertNotIn("fixture-private-value", result.stdout)
+
+    def test_doctor_warns_when_indexed_source_is_outside_the_configured_search_paths(self):
+        skill = Path(__file__).resolve().parents[1]
+        script = skill / "scripts" / "l05_setup.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vault = root / "Vault"
+            config = root / "l05.env"
+            subprocess.run(
+                [sys.executable, str(script), "init", "--vault", str(vault), "--config-file", str(config), "--jira-base-url", "https://jira.example.test"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            config.write_text(config.read_text(encoding="utf-8").replace("JIRA_TOKEN=", "JIRA_TOKEN=fixture-private-value"), encoding="utf-8")
+            profile_path = vault / ".l05-profile.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["knowledge"].pop("wiki_sources_general")
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            source = vault / "wiki" / "sources" / "entry-guides.md"
+            source.write_text("# entry guide\n", encoding="utf-8")
+            (vault / "index.md").write_text("# index\n\n- [[wiki/sources/entry-guides|automation entry guide]]\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(script), "doctor", "--config-file", str(config)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "ready")
+            self.assertIn("indexed_source_outside_search_paths:wiki/sources/entry-guides.md", report["warnings"])
+            self.assertNotIn("fixture-private-value", result.stdout)
+
+    def test_search_helper_includes_configured_raw_entry_guides(self):
+        skill = Path(__file__).resolve().parents[1]
+        setup = skill / "scripts" / "l05_setup.py"
+        search = skill / "scripts" / "search_obsidian.py"
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory) / "Vault"
+            subprocess.run(
+                [sys.executable, str(setup), "init", "--vault", str(vault), "--skip-config"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            profile_path = vault / ".l05-profile.json"
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile["knowledge"].pop("raw_files")
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            (vault / "raw" / "files" / "entry-guides.md").write_text(
+                "### Account recovery\n- **入口名称**: (Automated) Confluence Account Recovery\n",
+                encoding="utf-8",
+            )
+            (vault / "wiki" / "sources" / "documents" / "noisy.md").write_text("Confluence appears in an unrelated source.\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(search), "Confluence", "--vault", str(vault), "--max-results", "1"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertIn("raw/files", report["searched_paths"])
+            self.assertTrue(report["matches"])
+            self.assertTrue(all(item["path"] == "raw/files/entry-guides.md" and item["source_layer"] == "raw_file" for item in report["matches"]))
 
     def test_doctor_returns_complete_secret_safe_setup_actions(self):
         skill = Path(__file__).resolve().parents[1]
@@ -407,6 +511,36 @@ class SafetyTests(unittest.TestCase):
         validation = validate_profile(profile)
         self.assertFalse(validation["valid"])
         self.assertIn("loki_gateway_url_is_invalid", {item["code"] for item in validation["errors"]})
+
+    def test_profile_cluster_directory_replaces_kubectl_routes_and_allows_loki_auto_reconciliation(self):
+        skill = Path(__file__).resolve().parents[1]
+        profile = json.loads((skill / "assets" / "vault-template" / ".l05-profile.json").read_text(encoding="utf-8"))
+        profile["cluster_directory"] = {"routes": [{
+            "id": "example-qa",
+            "match": {"environment": ["qa"], "subscription": ["example-subscription"], "cloud": "azure"},
+            "cluster_aliases": ["example-qa"],
+        }]}
+        profile["optional_evidence_providers"] = [{
+            "provider_id": "kubectl",
+            "enabled": True,
+            "capabilities": ["k8s.pod.anomalies"],
+            "match": {"problem_types": ["kubernetes.*"], "match_mode": "any"},
+            "config": {},
+        }, {
+            "provider_id": "loki",
+            "enabled": True,
+            "capabilities": ["loki.gateway.health"],
+            "match": {"problem_types": ["kubernetes.*"], "match_mode": "any"},
+            "config": {"auto_gateway_reconciliation": True, "gateways": [{
+                "cluster_ref": "example-qa",
+                "gateway_url": "https://loki.example.test",
+            }]},
+        }]
+        self.assertTrue(validate_profile(profile)["valid"])
+        profile["cluster_directory"]["routes"][0]["match"].pop("subscription")
+        validation = validate_profile(profile)
+        self.assertFalse(validation["valid"])
+        self.assertIn("cluster_directory_match_fields_are_invalid", {item["code"] for item in validation["errors"]})
 
     def test_profile_component_log_placement_is_independent_and_cluster_backed(self):
         skill = Path(__file__).resolve().parents[1]

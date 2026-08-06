@@ -44,17 +44,21 @@ KNOWLEDGE_REQUIRED = (
 SELECTOR_KEYS = ("problem_types", "keywords", "components")
 PROVIDER_CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{1,95}$")
 JIRA_FIELD_MAPPING_SLOTS = {
+    "domain",
     "application",
     "event_timestamp",
     "request_type",
     "question_classification",
     "issue_category",
     "environment",
+    "namespace",
     "request_id",
     "source_environment",
     "subscription",
     "target_environment",
 }
+JIRA_FIELD_VALUE_PATH_SLOTS = {"domain", "application", "namespace"}
+JIRA_FIELD_VALUE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
 LOKI_CAPABILITIES = {
     "loki.gateway.health",
     "loki.labels.list",
@@ -171,8 +175,15 @@ def safe_loki_gateway_url(value: Any) -> str | None:
 def validate_kubectl_provider_config(provider: dict[str, Any], base: str) -> tuple[list[dict[str, str]], set[str]]:
     errors: list[dict[str, str]] = []
     config = provider.get("config")
-    if not isinstance(config, dict) or set(config) != {"routes"}:
-        return [error("kubectl_config_must_contain_only_routes", f"{base}.config")], set()
+    if not isinstance(config, dict):
+        return [error("kubectl_config_must_be_object", f"{base}.config")], set()
+    # Cluster routing now belongs to the Core Profile's cluster_directory.  An
+    # empty Provider config is the normal form; routes remain a validated
+    # compatibility form for installed Profiles during migration.
+    if not config:
+        return [], set()
+    if set(config) != {"routes"}:
+        return [error("kubectl_config_must_contain_only_legacy_routes", f"{base}.config")], set()
     routes = config.get("routes")
     if not isinstance(routes, list) or not routes or len(routes) > 100:
         return [error("kubectl_routes_must_be_nonempty_array", f"{base}.config.routes")], set()
@@ -226,8 +237,10 @@ def validate_loki_provider_config(provider: dict[str, Any], base: str) -> tuple[
     if any(capability not in LOKI_CAPABILITIES for capability in capabilities):
         errors.append(error("loki_capability_is_unknown", f"{base}.capabilities"))
     config = provider.get("config")
-    if not isinstance(config, dict) or set(config) != {"gateways"}:
+    if not isinstance(config, dict) or set(config) - {"gateways", "auto_gateway_reconciliation"}:
         return [*errors, error("loki_config_must_contain_only_gateways", f"{base}.config")], set()
+    if not isinstance(config.get("auto_gateway_reconciliation", False), bool):
+        errors.append(error("loki_auto_gateway_reconciliation_must_be_boolean", f"{base}.config.auto_gateway_reconciliation"))
     gateways = config.get("gateways")
     if not isinstance(gateways, list) or len(gateways) > 100:
         return [*errors, error("loki_gateways_must_be_array", f"{base}.config.gateways")], set()
@@ -250,6 +263,61 @@ def validate_loki_provider_config(provider: dict[str, Any], base: str) -> tuple[
             errors.append(error("loki_gateway_url_must_be_unique", f"{gateway_base}.gateway_url"))
         else:
             gateway_urls.add(gateway_url)
+    return errors, cluster_refs
+
+
+def validate_cluster_directory(value: Any) -> tuple[list[dict[str, str]], set[str]]:
+    if value is None:
+        return [], set()
+    base = "$.cluster_directory"
+    if not isinstance(value, dict) or set(value) != {"routes"}:
+        return [error("cluster_directory_fields_are_invalid", base)], set()
+    routes = value.get("routes")
+    if not isinstance(routes, list) or not routes or len(routes) > 100:
+        return [error("cluster_directory_routes_must_be_nonempty_array", f"{base}.routes")], set()
+    errors: list[dict[str, str]] = []
+    route_ids: set[str] = set()
+    cluster_refs: set[str] = set()
+    for index, route in enumerate(routes):
+        route_base = f"{base}.routes[{index}]"
+        if not isinstance(route, dict) or set(route) != {"id", "match", "cluster_aliases"}:
+            errors.append(error("cluster_directory_route_fields_are_invalid", route_base))
+            continue
+        route_id = route.get("id")
+        if not isinstance(route_id, str) or not ID_PATTERN.fullmatch(route_id) or route_id in route_ids:
+            errors.append(error("cluster_directory_route_id_is_invalid_or_duplicate", f"{route_base}.id"))
+        else:
+            route_ids.add(route_id)
+        aliases = route.get("cluster_aliases")
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or len(aliases) > 2
+            or len(aliases) != len(set(aliases))
+            or any(not isinstance(alias, str) or not ID_PATTERN.fullmatch(alias) for alias in aliases)
+        ):
+            errors.append(error("cluster_directory_aliases_are_invalid", f"{route_base}.cluster_aliases"))
+        else:
+            overlap = cluster_refs.intersection(aliases)
+            if overlap:
+                errors.append(error("cluster_directory_aliases_conflict", f"{route_base}.cluster_aliases"))
+            cluster_refs.update(aliases)
+        match = route.get("match")
+        if not isinstance(match, dict) or set(match) != {"environment", "subscription", "cloud"}:
+            errors.append(error("cluster_directory_match_fields_are_invalid", f"{route_base}.match"))
+            continue
+        for key in ("environment", "subscription"):
+            values = match.get(key)
+            if (
+                not isinstance(values, list)
+                or not values
+                or len(values) > 20
+                or len(values) != len(set(values))
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 128 for item in values)
+            ):
+                errors.append(error("cluster_directory_match_values_are_invalid", f"{route_base}.match.{key}"))
+        if match.get("cloud") not in ("azure", "aliyun"):
+            errors.append(error("cluster_directory_cloud_is_invalid", f"{route_base}.match.cloud"))
     return errors, cluster_refs
 
 
@@ -359,6 +427,8 @@ def validate_profile(profile: Any) -> dict[str, Any]:
     errors.extend(find_sensitive_keys(profile))
     observability_errors, placement_cluster_refs = validate_observability_config(profile.get("observability"))
     errors.extend(observability_errors)
+    directory_errors, directory_cluster_refs = validate_cluster_directory(profile.get("cluster_directory"))
+    errors.extend(directory_errors)
     version = profile.get("profile_version")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         errors.append(error("profile_version_must_be_semver", "$.profile_version"))
@@ -400,6 +470,23 @@ def validate_profile(profile: Any) -> dict[str, Any]:
                     invalid_selectors = True
                 if invalid_selectors:
                     errors.append(error("jira_field_mapping_selectors_are_invalid", base))
+        field_value_paths = jira.get("field_value_paths", {})
+        if not isinstance(field_value_paths, dict):
+            errors.append(error("jira_field_value_paths_must_be_object", "$.jira.field_value_paths"))
+        else:
+            for slot, paths in field_value_paths.items():
+                base = f"$.jira.field_value_paths.{slot}"
+                if slot not in JIRA_FIELD_VALUE_PATH_SLOTS:
+                    errors.append(error("jira_field_value_path_slot_is_unknown", base))
+                invalid_paths = (
+                    not isinstance(paths, list)
+                    or not paths
+                    or any(not isinstance(path, str) or not JIRA_FIELD_VALUE_PATH_PATTERN.fullmatch(path) for path in paths)
+                )
+                if not invalid_paths and len(paths) != len(set(paths)):
+                    invalid_paths = True
+                if invalid_paths:
+                    errors.append(error("jira_field_value_paths_are_invalid", base))
 
     code = profile.get("code")
     if not isinstance(code, dict):
@@ -519,12 +606,12 @@ def validate_profile(profile: Any) -> dict[str, Any]:
             provider_errors, refs = validate_loki_provider_config(provider, base)
             errors.extend(provider_errors)
             loki_cluster_refs.update(refs)
-    if loki_configured and "kubectl" not in provider_ids:
-        errors.append(error("loki_requires_kubectl_cluster_directory", "$.optional_evidence_providers"))
-    for cluster_ref in sorted(loki_cluster_refs - kubectl_cluster_refs):
-        errors.append(error("loki_cluster_ref_is_not_in_kubectl_routes", f"$.optional_evidence_providers.loki.config.gateways[{cluster_ref}]"))
-    for cluster_ref in sorted(placement_cluster_refs - kubectl_cluster_refs):
-        errors.append(error("component_log_placement_cluster_ref_is_not_in_kubectl_routes", f"$.observability.component_log_placements[{cluster_ref}]"))
+    known_cluster_refs = directory_cluster_refs or kubectl_cluster_refs
+    cluster_directory_code = "cluster_directory" if directory_cluster_refs else "kubectl_routes"
+    for cluster_ref in sorted(loki_cluster_refs - known_cluster_refs):
+        errors.append(error(f"loki_cluster_ref_is_not_in_{cluster_directory_code}", f"$.optional_evidence_providers.loki.config.gateways[{cluster_ref}]"))
+    for cluster_ref in sorted(placement_cluster_refs - known_cluster_refs):
+        errors.append(error(f"component_log_placement_cluster_ref_is_not_in_{cluster_directory_code}", f"$.observability.component_log_placements[{cluster_ref}]"))
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
