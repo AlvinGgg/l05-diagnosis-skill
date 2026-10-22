@@ -431,10 +431,35 @@ Jira 回复草稿默认使用中文。排查类只有当前证据确认根因后
 
 ## 本地验证
 
+离线回归测试只需要 Python、Node.js、Git 和 `rg`（ripgrep）。两组测试会调用
+另一种语言的辅助脚本，因此运行任一组前都应安装两个运行时。`rg` 是 Python
+测试中 Git 快照搜索用例的必需工具；Ubuntu 可通过 `sudo apt-get install ripgrep`
+安装。测试仅使用标准库、仓库自带代码、临时 Vault、模拟 Provider 和 Jira
+Fixture，无需 npm/pip 安装、真实 Jira 凭据、Kubernetes 集群或个人 Obsidian Vault。
+请在没有个人 L05 配置或凭据的干净环境运行；“Jira 不可用”用例在未配置 Token
+时会直接验证采集阻断行为。
+
 ```bash
-python3 "$CODEX_HOME/skills/.system/skill-creator/scripts/quick_validate.py" .
 node --test tests/*.test.mjs
 python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+`.github/workflows/ci.yml` 在所有 Pull Request 和 main 分支推送时自动运行上述
+命令。CI 使用 Ubuntu 24.04、Node.js 22.22.0 和 Python 3.12.3，官方 Actions 固定到
+完整 Commit SHA；更新版本时应同步修改工作流并重新验证。这是 CI 验证基线，
+不代表已覆盖环境要求中的全部最低版本。Runner 镜像和 Ubuntu 软件包仍会更新。
+
+GitHub 的 Checks/Actions 页面会分别展示 `Node.js tests` 和 `Python tests`；任一
+命令返回非零值都会使对应检查失败，另一组仍会运行。每组最多运行 10 分钟，同一
+PR 或 main 分支有新提交时会取消旧运行。CI 仅授予 `contents: read`，不保留
+Checkout 凭据，不注入 Secrets，也不上传 Vault、配置或测试临时文件。依赖准备
+需要网络；测试本身不依赖外部服务成功响应。分支保护中的必需检查仍需仓库维护者
+单独配置。
+
+以下为可选的 Skill 格式与泄漏检查，需要另行安装相应工具，不属于上述 CI：
+
+```bash
+python3 "$CODEX_HOME/skills/.system/skill-creator/scripts/quick_validate.py" .
 gitleaks detect --no-git --redact --source .
 ```
 

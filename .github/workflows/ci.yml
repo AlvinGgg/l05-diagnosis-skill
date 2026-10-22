@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.suite }} tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [Node.js, Python]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Both suites spawn helpers that need the other runtime.
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12.3'
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.22.0'
+          package-manager-cache: false
+      - name: Install ripgrep for Git snapshot regression
+        if: matrix.suite == 'Python'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ripgrep
+      - name: Show tool versions
+        run: |
+          python3 --version
+          node --version
+          git --version
+      - name: Run Node.js regression tests
+        if: matrix.suite == 'Node.js'
+        env:
+          L05_CONFIG_FILE: ${{ runner.temp }}/l05-ci-no-config.env
+          L05_PROVIDER_DIR: ${{ runner.temp }}/l05-ci-no-providers
+        run: node --test tests/*.test.mjs
+      - name: Run Python safety tests
+        if: matrix.suite == 'Python'
+        env:
+          L05_CONFIG_FILE: ${{ runner.temp }}/l05-ci-no-config.env
+          L05_PROVIDER_DIR: ${{ runner.temp }}/l05-ci-no-providers
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
